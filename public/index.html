@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Загрузка проекта</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 32px 16px; }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { margin: 0 0 8px; }
+  p.sub { color: #94a3b8; margin: 0 0 24px; }
+  #drop { border: 2px dashed #475569; border-radius: 16px; padding: 48px 16px; text-align: center; transition: .2s; background: #1e293b; }
+  #drop.over { border-color: #38bdf8; background: #0c4a6e; }
+  .btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 16px; }
+  button, label.btn { background: #38bdf8; color: #0f172a; border: 0; border-radius: 10px; padding: 12px 18px; font-weight: 600; cursor: pointer; font-size: 15px; }
+  button.secondary { background: #334155; color: #e2e8f0; }
+  input[type=file] { display: none; }
+  #progress { margin-top: 24px; display: none; }
+  .bar { height: 10px; background: #334155; border-radius: 99px; overflow: hidden; }
+  .bar div { height: 100%; width: 0; background: #22c55e; transition: width .2s; }
+  #status { margin-top: 8px; color: #94a3b8; font-size: 14px; }
+  #list { margin-top: 24px; background: #1e293b; border-radius: 12px; padding: 16px; max-height: 360px; overflow: auto; font-family: ui-monospace, monospace; font-size: 13px; }
+  #list .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  #list .size { color: #64748b; white-space: nowrap; }
+  .head { display: flex; justify-content: space-between; align-items: center; margin-top: 32px; }
+  .ok { color: #22c55e; }
+</style>
+</head>
+<body>
+<main>
+  <h1>📦 Загрузка проекта</h1>
+  <p class="sub">Перетащите сюда папку проекта, файлы или .zip-архив. Папки <code>node_modules</code>, <code>.git</code> и т.п. пропускаются автоматически.</p>
+
+  <div id="drop">
+    <div style="font-size:18px">Перетащите файлы или папку сюда</div>
+    <div class="btns">
+      <label class="btn">📁 Выбрать папку<input id="dirInput" type="file" webkitdirectory multiple /></label>
+      <label class="btn">📄 Выбрать файлы / .zip<input id="fileInput" type="file" multiple /></label>
+    </div>
+  </div>
+
+  <div id="progress">
+    <div class="bar"><div id="barFill"></div></div>
+    <div id="status"></div>
+  </div>
+
+  <div class="head">
+    <h3 style="margin:0">Загруженные файлы (<span id="count">0</span>)</h3>
+    <button class="secondary" id="clearBtn">Очистить</button>
+  </div>
+  <div id="list"></div>
+</main>
+
+<script>
+const SKIP = /(^|\/)(node_modules|\.git|\.next|dist|build|\.venv|venv|__pycache__|\.DS_Store)(\/|$)/;
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB";
+
+async function refresh() {
+  const files = await (await fetch("/api/files")).json();
+  $("count").textContent = files.length;
+  $("list").innerHTML = files.length
+    ? files.map(f => `<div class="row"><span>${f.path.replace(/</g, "&lt;")}</span><span class="size">${fmt(f.size)}</span></div>`).join("")
+    : '<span style="color:#64748b">Пока ничего нет</span>';
+}
+
+async function upload(items) {
+  items = items.filter(i => !SKIP.test(i.path));
+  if (!items.length) return;
+  $("progress").style.display = "block";
+  const total = items.reduce((s, i) => s + i.file.size, 0) || 1;
+  let done = 0, failed = 0, idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const { file, path } = items[idx++];
+      try {
+        const r = await fetch("/api/upload?path=" + encodeURIComponent(path), { method: "PUT", body: file });
+        if (!r.ok) failed++;
+      } catch { failed++; }
+      done += file.size;
+      $("barFill").style.width = (done / total * 100) + "%";
+      $("status").textContent = `Загружено ${fmt(done)} из ${fmt(total)} — ${path}`;
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  $("status").innerHTML = failed
+    ? `Готово, но ${failed} файл(ов) не загрузились`
+    : `<span class="ok">✅ Готово! Загружено файлов: ${items.length}. Напишите в чат, что всё загружено.</span>`;
+  refresh();
+}
+
+// Recursively read dropped folders via the FileSystemEntry API.
+function readEntry(entry, prefix = "") {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      entry.file(f => resolve([{ file: f, path: prefix + f.name }]), () => resolve([]));
+    } else if (entry.isDirectory) {
+      if (SKIP.test(prefix + entry.name)) return resolve([]);
+      const reader = entry.createReader(), all = [];
+      const readBatch = () => reader.readEntries(async (entries) => {
+        if (!entries.length) {
+          const nested = await Promise.all(all.map(e => readEntry(e, prefix + entry.name + "/")));
+          return resolve(nested.flat());
+        }
+        all.push(...entries); readBatch();
+      }, () => resolve([]));
+      readBatch();
+    } else resolve([]);
+  });
+}
+
+const drop = $("drop");
+["dragenter", "dragover"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", async (ev) => {
+  const entries = [...ev.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  const items = entries.length
+    ? (await Promise.all(entries.map(e => readEntry(e)))).flat()
+    : [...ev.dataTransfer.files].map(f => ({ file: f, path: f.name }));
+  upload(items);
+});
+
+const fromInput = (input) => upload([...input.files].map(f => ({ file: f, path: f.webkitRelativePath || f.name })));
+$("dirInput").addEventListener("change", e => fromInput(e.target));
+$("fileInput").addEventListener("change", e => fromInput(e.target));
+$("clearBtn").addEventListener("click", async () => {
+  if (!confirm("Удалить все загруженные файлы?")) return;
+  await fetch("/api/files", { method: "DELETE" });
+  refresh();
+});
+refresh();
+</script>
+</body>
+</html>
