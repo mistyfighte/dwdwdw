@@ -33,7 +33,14 @@
             root = document.createElement('div');
             root.id = 'lg-ambilight';
             root.setAttribute('aria-hidden', 'true');
-            root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2200;opacity:0;transition:opacity .65s ease;mix-blend-mode:screen;contain:strict;';
+            // Painted BEHIND the page (z-index:-1 in the root stacking
+            // context) and positioned in document coordinates. The old fixed
+            // overlay above the page needed a video-shaped hole (rectangular,
+            // so the player's rounded corners showed dark notches), had to be
+            // clipped away from the sidebar, and was repositioned from a
+            // scroll handler a frame behind the compositor, so it swam while
+            // scrolling. overflow-x:clip keeps the glow from widening the page.
+            root.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:0;overflow-x:clip;pointer-events:none;z-index:-1;opacity:0;transition:opacity .65s ease;mix-blend-mode:screen;';
             canvas = document.createElement('canvas');
             canvas.width = width; canvas.height = height;
             canvas.style.cssText = 'position:absolute;pointer-events:none;';
@@ -91,28 +98,23 @@
         const rect = contentRect(element, crop);
         if (rect.width < 24 || rect.height < 24) return null;
         const margin = Math.min(230, Math.max(48, Math.min(rect.width, rect.height) * 0.34));
-        let right = innerWidth, top = 0;
-        const secondary = document.querySelector('ytd-watch-flexy #secondary');
-        if (secondary) {
-            const side = secondary.getBoundingClientRect();
-            if (side.width > 0 && side.left >= rect.left + rect.width - 8 && side.top < rect.top + rect.height + margin && side.bottom > rect.top - margin) right = Math.min(right, side.left - 10);
-        }
-        const masthead = document.querySelector('#masthead-container');
-        if (masthead) {
-            const head = masthead.getBoundingClientRect();
-            if (head.bottom > 0 && head.bottom <= rect.top + 8) top = head.bottom;
-        }
         const canvasWidth = rect.width + margin * 2, canvasHeight = rect.height + margin * 2;
-        const key = [rect.left, rect.top, rect.width, rect.height, right, top, innerWidth, innerHeight].join(':');
+        const pageLeft = rect.left + (window.scrollX || 0), pageTop = rect.top + (window.scrollY || 0);
+        // The hole only has to hide blur bleeding under the opaque frame, so
+        // it sits inside the content rect (by the player's corner radius):
+        // an outward hole left a dark seam and dark rounded corners.
+        const radius = player ? parseFloat(getComputedStyle(player).borderTopLeftRadius) || 0 : 0;
+        const inset = Math.min(Math.min(rect.width, rect.height) / 4, radius + 2);
+        const key = [pageLeft, pageTop, rect.width, rect.height, inset].join(':');
         if (key !== geometry) {
             geometry = key;
-            const leftHole = margin - 1, rightHole = margin + rect.width + 1;
-            const topHole = margin - 1, bottomHole = margin + rect.height + 1;
-            root.style.clipPath = 'inset(' + top + 'px ' + Math.max(0, innerWidth - right) + 'px 0px 0px)';
-            root.style.maskImage = 'linear-gradient(to right,#000 ' + Math.max(0, right - 36) + 'px,transparent ' + right + 'px)';
-            canvas.style.clipPath = 'polygon(evenodd,0% 0%,100% 0%,100% 100%,0% 100%,0% 0%,' + leftHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + topHole + 'px)';
+            const leftHole = margin + inset, rightHole = margin + rect.width - inset;
+            const topHole = margin + inset, bottomHole = margin + rect.height - inset;
+            // Outer ring well beyond the box: clipping at 0%/100% cut the
+            // blur off in a hard line at the canvas edge.
+            canvas.style.clipPath = 'polygon(evenodd,-50% -50%,150% -50%,150% 150%,-50% 150%,-50% -50%,' + leftHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + topHole + 'px)';
             Object.assign(canvas.style, {
-                left: (rect.left - margin) + 'px', top: (rect.top - margin) + 'px',
+                left: (pageLeft - margin) + 'px', top: (pageTop - margin) + 'px',
                 width: canvasWidth + 'px', height: canvasHeight + 'px',
                 filter: 'blur(' + Math.min(58, margin * 0.26) + 'px) saturate(1.28)'
             });

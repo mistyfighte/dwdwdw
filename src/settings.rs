@@ -15,8 +15,6 @@ pub struct Settings {
     pub theme: bool,
     /// In-page ad hiding + auto-skip (features.rs).
     pub block_ads: bool,
-    /// "Аналитика видео" stats panel on watch pages (analytics.rs).
-    pub analytics: bool,
     /// Close button hides to tray instead of quitting. Only meaningful when a
     /// tray is actually available; ignored otherwise.
     pub close_to_tray: bool,
@@ -43,7 +41,6 @@ impl Default for Settings {
         Self {
             theme: true,
             block_ads: true,
-            analytics: true,
             close_to_tray: true,
             always_on_top: false,
             cinema: false,
@@ -74,10 +71,9 @@ impl Settings {
     pub fn to_json(&self) -> String {
         let b = |v: bool| if v { "true" } else { "false" };
         format!(
-            "{{\"theme\":{},\"block_ads\":{},\"analytics\":{},\"close_to_tray\":{},\"always_on_top\":{},\"cinema\":{},\"prefer_hd\":{},\"discord_rpc\":{},\"discord_configured\":{}}}",
+            "{{\"theme\":{},\"block_ads\":{},\"close_to_tray\":{},\"always_on_top\":{},\"cinema\":{},\"prefer_hd\":{},\"discord_rpc\":{},\"discord_configured\":{}}}",
             b(self.theme),
             b(self.block_ads),
-            b(self.analytics),
             b(self.close_to_tray),
             b(self.always_on_top),
             b(self.cinema),
@@ -124,7 +120,6 @@ fn load_from(s: &mut Settings, path: &std::path::Path) {
         match key {
             "theme" => s.theme = on,
             "block_ads" => s.block_ads = on,
-            "analytics" => s.analytics = on,
             "close_to_tray" => s.close_to_tray = on,
             "always_on_top" => s.always_on_top = on,
             "cinema" => s.cinema = on,
@@ -160,10 +155,9 @@ fn save_to(s: &Settings, path: &std::path::Path) -> std::io::Result<()> {
     atomic_write(path, |file| {
         write!(
         file,
-        "theme={}\nblock_ads={}\nanalytics={}\nclose_to_tray={}\nalways_on_top={}\ncinema={}\nprefer_hd={}\ndiscord_rpc={}\ndiscord_client_id={}\n",
+        "theme={}\nblock_ads={}\nclose_to_tray={}\nalways_on_top={}\ncinema={}\nprefer_hd={}\ndiscord_rpc={}\ndiscord_client_id={}\n",
         one(s.theme),
         one(s.block_ads),
-        one(s.analytics),
         one(s.close_to_tray),
         one(s.always_on_top),
         one(s.cinema),
@@ -262,7 +256,6 @@ mod tests {
         let s = Settings {
             theme: false,
             block_ads: false,
-            analytics: true,
             close_to_tray: false,
             always_on_top: true,
             cinema: false,
@@ -283,7 +276,6 @@ mod tests {
         let s = Settings {
             theme: false,
             block_ads: false,
-            analytics: false,
             close_to_tray: false,
             always_on_top: false,
             cinema: false,
@@ -314,7 +306,6 @@ mod tests {
         // block_ads=0 parsed correctly
         assert!(!s.block_ads);
         // everything else stays default
-        assert!(s.analytics);
         assert!(s.close_to_tray);
         assert!(!s.always_on_top);
         let _ = std::fs::remove_file(&path);
@@ -323,11 +314,11 @@ mod tests {
     #[test]
     fn accepts_true_spelling() {
         let path = tmp_settings_file();
-        std::fs::write(&path, "theme=true\nanalytics=TRUE\nalways_on_top=True\n").unwrap();
+        std::fs::write(&path, "theme=true\ncinema=TRUE\nalways_on_top=True\n").unwrap();
         let mut s = Settings::default();
         load_from(&mut s, &path);
         assert!(s.theme);
-        assert!(s.analytics);
+        assert!(s.cinema);
         assert!(s.always_on_top);
         let _ = std::fs::remove_file(&path);
     }
@@ -424,11 +415,11 @@ mod tests {
     #[test]
     fn whitespace_duplicates_and_invalid_values_are_safe() {
         let path = tmp_settings_file();
-        std::fs::write(&path, "\u{feff} theme = FALSE\r\ntheme=typo\nanalytics=0\nanalytics=\ncinema=TrUe\ndiscord_client_id=12345\ndiscord_client_id=invalid\n").unwrap();
+        std::fs::write(&path, "\u{feff} theme = FALSE\r\ntheme=typo\nblock_ads=0\nblock_ads=\ncinema=TrUe\ndiscord_client_id=12345\ndiscord_client_id=invalid\n").unwrap();
         let mut settings = Settings::default();
         load_from(&mut settings, &path);
         assert!(!settings.theme);
-        assert!(!settings.analytics);
+        assert!(!settings.block_ads);
         assert!(settings.cinema);
         assert_eq!(settings.discord_client_id, "12345");
         std::fs::remove_file(path).unwrap();

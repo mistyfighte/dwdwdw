@@ -46,13 +46,15 @@
             button = document.createElement('button');
             button.type = 'button';
             button.className = 'ytp-button yg-pip-button';
-            button.style.cssText = 'vertical-align:top;';
+            // Same markup as YouTube's own control icons (24x24 svg, player
+            // CSS centers it); the old inline vertical-align pushed it ~9px low.
             const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
             icon.setAttribute('viewBox', '0 0 24 24');
+            icon.setAttribute('width', '24');
+            icon.setAttribute('height', '24');
             icon.setAttribute('aria-hidden', 'true');
-            icon.style.cssText = 'width:24px;height:24px;vertical-align:middle;';
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            path.setAttribute('fill', 'currentColor');
+            path.setAttribute('fill', '#fff');
             path.setAttribute('d', 'M3 4h18v16H3V4zm2 2v12h14V6H5zm6 6h7v5h-7v-5z');
             icon.appendChild(path); button.appendChild(icon);
             button.addEventListener('click', togglePip);

@@ -6,7 +6,7 @@
 //! Glass theme so it doesn't feel like a foreign surface.
 //!
 //! Toggles split into two groups: "live" ones (take effect immediately via
-//! the event loop) and "apply on restart" ones (theme/ads/analytics are
+//! the event loop) and "apply on restart" ones (theme/ads/cinema are
 //! init-scripts and can't be removed in place).
 
 /// Serves the settings page. Called from the custom-protocol handler in
@@ -183,7 +183,6 @@ var LIVE = {{ always_on_top: 1, close_to_tray: 1 }};
 var LABELS = {{
   theme:        {{ t: 'Тема Liquid Glass', d: 'Стеклянная монохромная тема оформления YouTube.' }},
   block_ads:    {{ t: 'Скрытие рекламных баннеров', d: 'Скрывать рекламные баннеры и рекламу в ленте (без пропуска видео-рекламы).' }},
-  analytics:    {{ t: 'Аналитика видео', d: 'Показывать панель со статистикой (просмотры, лайки, дизлайки, вовлечённость) на странице просмотра.' }},
   cinema:       {{ t: 'Режим кинотеатра', d: 'Включать затемнение вокруг плеера при запуске. Кнопка с иконкой луны в панели плеера всегда доступна для переключения.' }},
   prefer_hd:    {{ t: 'Предпочитать 1080p HD', d: 'Записывает предпочтение качества 1080p в профиль YouTube. YouTube может понизить качество при медленном интернете или если ролик не имеет 1080p.' }},
   discord_rpc:  {{ t: 'Discord Rich Presence', d: 'Показывать «Смотрит: название видео» с обложкой в статусе Discord.' }},
@@ -203,7 +202,7 @@ function render() {{
   while (content.firstChild) content.removeChild(content.firstChild);
 
   var live = ['always_on_top','close_to_tray'];
-  var restart = ['theme','block_ads','analytics','cinema','prefer_hd','discord_rpc'];
+  var restart = ['theme','block_ads','cinema','prefer_hd','discord_rpc'];
   var mk = function (keys) {{
     var frag = document.createDocumentFragment();
     keys.forEach(function (k) {{

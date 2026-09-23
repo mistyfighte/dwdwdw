@@ -189,7 +189,9 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             "ytd-video-renderer[is-ad],ytd-compact-video-renderer[is-ad],ytd-reel-video-renderer[is-ad]," +
             "ytd-search-pyv-renderer,ytd-shopping-product-renderer[is-ad],#masthead-ad," +
             "ytd-engagement-panel-section-list-renderer[target-id=engagement-panel-ads]," +
-            "ytd-rich-section-renderer:has(ytd-statement-banner-renderer)" +
+            "ytd-rich-section-renderer:has(ytd-statement-banner-renderer)," +
+            // Return YouTube Dislike's own "premium" promo card.
+            ".ryd-premium-teaser" +
             "{{display:none!important;}}";
         function addAdStyle() {{
             if (!BLOCK_ADS) return;
@@ -228,8 +230,10 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             var s = document.createElement('style');
             s.id = 'lg-cinema-style';
             s.textContent =
-                '#lg-cinema-veil{{position:fixed;z-index:2100;pointer-events:none;' +
-                    'border-radius:18px;' +
+                // Absolute in document coordinates so it scrolls with the
+                // page natively; a fixed veil moved from a scroll handler
+                // lagged a frame behind and swam over the video.
+                '#lg-cinema-veil{{position:absolute;z-index:2100;pointer-events:none;' +
                     'box-shadow:0 0 0 200vmax rgba(0,0,0,0.82);' +
                     'opacity:0;transition:opacity 0.7s cubic-bezier(0.22,1,0.36,1);}}' +
                 'html.lg-cinema #lg-cinema-veil{{opacity:1;}}' +
@@ -249,8 +253,11 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         document.addEventListener('readystatechange', addCinemaStyle);
         document.addEventListener('DOMContentLoaded', addCinemaStyle);
 
+        // The player element itself: theater and fullscreen move it out of
+        // #player-container-inner (which then collapses), so the old host
+        // put the hole in the wrong place in theater ("wide") mode.
         function veilHost() {{
-            return document.querySelector('#player-container-inner') ||
+            return document.getElementById('movie_player') ||
                    document.querySelector('.html5-video-player');
         }}
 
@@ -260,13 +267,13 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             var host = veilHost();
             if (!host) return;
             var r = host.getBoundingClientRect();
-            veil.style.left = r.left + 'px';
-            veil.style.top = r.top + 'px';
+            veil.style.left = (r.left + window.scrollX) + 'px';
+            veil.style.top = (r.top + window.scrollY) + 'px';
             veil.style.width = r.width + 'px';
             veil.style.height = r.height + 'px';
+            veil.style.borderRadius = getComputedStyle(host).borderRadius;
         }}
         window.addEventListener('resize', syncVeil);
-        window.addEventListener('scroll', syncVeil, true);
         // Theater/default toggles and late layout shifts resize the player
         // without any window resize/scroll, which left the hole misplaced
         // (dimming the video itself) until the next 3 s poll.
@@ -284,7 +291,7 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         function setCinema(on) {{
             if (!document.documentElement) return;
             var want = on && cinemaUserOn && /^\/watch/.test(location.pathname) &&
-                       !document.fullscreenElement;
+                       !fsLockWanted();
             if (want && !document.getElementById('lg-cinema-veil') && document.body) {{
                 var veil = document.createElement('div');
                 veil.id = 'lg-cinema-veil';
@@ -467,12 +474,13 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             if (!target) return;
             var s = document.createElement('style');
             s.id = 'lg-fs-lock-style';
-            // scrollbar-gutter keeps the layout from shifting sideways when
-            // the scrollbar disappears/reappears (classic scrollbars only;
-            // a no-op with overlay scrollbars).
+            // No scrollbar-gutter here: in fullscreen the reserved gutter was
+            // the dark strip left of the screen's right edge.
             s.textContent =
                 'html.lg-fs-lock,html.lg-fs-lock body{{overflow:hidden!important;}}' +
-                'html.lg-fs-lock{{scrollbar-gutter:stable;}}';
+                'html.lg-fs-lock::-webkit-scrollbar{{display:none;}}' +
+                'html.lg-fs-lock #movie_player video{{transform:scale(var(--lg-fs-fill,1));' +
+                    'transform-origin:50% 50%;}}';
             target.appendChild(s);
         }}
         addFsLockStyle();
@@ -493,6 +501,9 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             var on = fsLockWanted();
             if (on === fsLockActive) return;
             fsLockActive = on;
+            syncFsFill();
+            var fv = document.querySelector('video');
+            setCinema(!!(fv && !fv.paused));
             if (on) {{
                 // Remember where the page was so exit lands back exactly -
                 // YouTube itself may move the page while fullscreen.
@@ -507,11 +518,35 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             }}
         }}
 
+        // A 16:9 video on a slightly different screen (1440x800, 1366x768...)
+        // leaves thin black bars at the sides in fullscreen. Scale it to fill
+        // when the mismatch is at most 3% - a crop nobody can see; larger
+        // mismatches (21:9 monitors, 4:3 videos) keep their bars.
+        function syncFsFill() {{
+            var root = document.documentElement;
+            if (!root) return;
+            var scale = 1;
+            var player = document.getElementById('movie_player');
+            var v = player && player.querySelector('video');
+            if (fsLockActive && v && v.videoWidth && v.videoHeight) {{
+                var pr = player.getBoundingClientRect();
+                if (pr.width && pr.height) {{
+                    var va = v.videoWidth / v.videoHeight, pa = pr.width / pr.height;
+                    var cover = Math.max(va / pa, pa / va);
+                    if (cover > 1.001 && cover <= 1.03) scale = cover;
+                }}
+            }}
+            root.style.setProperty('--lg-fs-fill', String(scale));
+        }}
+        window.addEventListener('resize', syncFsFill);
+        document.addEventListener('loadedmetadata', syncFsFill, true);
+
         // Safety: SPA navigation and page teardown must never leave the
         // document stranded unscrollable. If a fullscreen mode is somehow
         // still active afterwards, the next mutation pass re-locks.
         function clearFsLock() {{
             fsLockActive = false;
+            syncFsFill();
             if (document.documentElement) {{
                 document.documentElement.classList.remove('lg-fs-lock');
             }}
@@ -745,9 +780,9 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         // Slotted next to the cinema toggle so both extras sit together. Cycles
         // off/flat/bass/vocal/cinema/treble and shows the current name as a
         // tooltip; lit-up icon = an effect is active.
-        var ICON_EQ = 'M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z'; // speaker up
-        var ICON_EQ_OFF = 'M7 9v6h4l5 5V4l-5 5H7zm9.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05' +
-            'c1.48-.73 2.5-2.25 2.5-4.02z';
+        // Material "equalizer" bars; dimmed while off (the old "on" icon
+        // was a house).
+        var ICON_EQ = 'M10 20h4V4h-4v16zm-6 0h4v-8H4v8zM16 9v11h4V9h-4z';
         var eqBtnRefresh = null; // lets the panel repaint the toolbar icon
 
         // Glass popup listing every preset; click applies instantly. Lives
@@ -866,7 +901,7 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             function refresh() {{
                 var cur = savedAudioPreset();
                 var active = cur !== 'off';
-                path.setAttribute('d', active ? ICON_EQ : ICON_EQ_OFF);
+                path.setAttribute('d', ICON_EQ);
                 path.style.opacity = active ? '1' : '0.5';
                 btn.title = cur === 'off' ? 'Эквалайзер (выкл)'
                     : ('Эквалайзер: ' + (PRESET_LABEL[cur] || cur));
@@ -887,34 +922,71 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         // never what you want mid-video - volume is. Windowed mode keeps the
         // wheel-over-player requirement so feed scrolling works normally.
         // Scrollable player popups (quality/speed lists, the EQ panel,
-        // chapters, end-screen overlays) must keep their own wheel scrolling.
+        // chapters, end-screen overlays) keep their own wheel scrolling.
         var WHEEL_PASSTHROUGH = '.ytp-popup, .ytp-settings-menu, .ytp-panel, #lg-eq-panel, ' +
             '.ytp-chapter-hover-container, .ytp-ce-element, .ytp-suggestion-set, ' +
             '.ytp-fullscreen-grid, .ytp-modern-videowall-still';
+        // One wheel gesture = one owner. A gesture that starts on the page
+        // stays a page scroll even when the player slides under the cursor
+        // (its later events are no longer cancelable, so changing the volume
+        // there made the page and the volume move together); one that starts
+        // on the player never scrolls the page.
+        var WHEEL_GESTURE_GAP = 500;
+        var wheelOwner = null, wheelLastAt = 0, wheelAccum = 0;
+
+        function popupCanScroll(target, root, dy) {{
+            for (var el = target; el && el !== root.parentNode; el = el.parentElement) {{
+                var oy = getComputedStyle(el).overflowY;
+                if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1) {{
+                    if (dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
+                }}
+            }}
+            return false;
+        }}
+
         document.addEventListener('wheel', function (e) {{
-            // Pinch/ctrl+wheel is page zoom; a pure horizontal swipe used to
-            // count as "wheel down" and silently lowered the volume.
-            if (e.ctrlKey || e.deltaY === 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
-            var player = document.querySelector('.html5-video-player');
-            var v = document.querySelector('video');
-            if (!player || !v) return;
-            if (!document.fullscreenElement && !player.contains(e.target)) return;
-            if (e.target && e.target.closest && e.target.closest(WHEEL_PASSTHROUGH)) return;
+            if (e.ctrlKey) return; // ctrl+wheel / pinch = page zoom
+            var now = e.timeStamp || Date.now();
+            var newGesture = now - wheelLastAt > WHEEL_GESTURE_GAP;
+            wheelLastAt = now;
+            var player = document.getElementById('movie_player') ||
+                         document.querySelector('.html5-video-player');
+            var v = player && player.querySelector('video');
+            var overPlayer = !!(player && v && (document.fullscreenElement || player.contains(e.target)));
+            if (newGesture) {{
+                wheelOwner = overPlayer && e.cancelable ? 'player' : 'page';
+                wheelAccum = 0;
+            }}
+            if (wheelOwner !== 'player') return;
+            var popup = e.target && e.target.closest && e.target.closest(WHEEL_PASSTHROUGH);
+            if (popup) {{
+                // Let the popup scroll, but never chain into the page.
+                if (!popupCanScroll(e.target, popup, e.deltaY)) e.preventDefault();
+                return;
+            }}
             e.preventDefault();
             e.stopPropagation();
-            var step = e.deltaY < 0 ? 5 : -5;
+            if (!v || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+            // Normalize to pixels and step once per notch (~100px). Touchpads
+            // and smooth-scrolling wheels send many small deltas, which used
+            // to swing the volume 5% per event (50 -> 0 in one swipe).
+            var dy = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1);
+            wheelAccum += dy;
+            var steps = wheelAccum > 0 ? Math.floor(wheelAccum / 100) : Math.ceil(wheelAccum / 100);
+            if (!steps) return;
+            wheelAccum -= steps * 100;
+            var delta = -steps * 5;
             // Go through the player API when possible so YouTube's volume
             // slider, mute state and remembered volume stay in sync; writing
             // video.volume directly was overwritten by the player later.
             if (typeof player.getVolume === 'function' && typeof player.setVolume === 'function') {{
-                var cur = player.getVolume();
-                var next = Math.min(100, Math.max(0, Math.round(cur + step)));
+                var next = Math.min(100, Math.max(0, Math.round(player.getVolume() + delta)));
                 player.setVolume(next);
                 if (next > 0 && player.isMuted && player.isMuted() && player.unMute) player.unMute();
                 osdVolume(next / 100);
                 return;
             }}
-            var vol = Math.min(1, Math.max(0, v.volume + step / 100));
+            var vol = Math.min(1, Math.max(0, v.volume + delta / 100));
             v.volume = vol;
             if (vol > 0) v.muted = false;
             osdVolume(vol);
@@ -961,6 +1033,8 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             // before any DOM mutation (or without one at all), so the
             // onMutation pipeline alone would miss the API-based path.
             syncFsLock();
+            // The player reaches its fullscreen size a frame later.
+            requestAnimationFrame(syncFsFill);
         }});
         // A reload or navigation while fullscreen never delivers the matching
         // fullscreenchange, which stranded the OS window borderless without a

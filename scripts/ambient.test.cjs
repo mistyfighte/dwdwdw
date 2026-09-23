@@ -25,16 +25,17 @@ function harness(options = {}) {
             elements.push(element); return element;
         }, video };
     const location = { pathname: '/watch' };
-    const window = { addEventListener: (name, listener) => { windows[name] = listener; } };
+    const window = { scrollX: 0, scrollY: options.scrollY || 0, addEventListener: (name, listener) => { windows[name] = listener; } };
     const timers = new Map();
     const context = { document, window, location, innerWidth: 1280, innerHeight: 900,
+        getComputedStyle: () => ({ borderTopLeftRadius: (options.radius ?? 16) + 'px' }),
         matchMedia: () => ({ matches: false, addEventListener() {} }),
         performance: { now: () => now },
         setInterval: callback => intervals.push(callback),
         setTimeout: callback => { const id = nextId++; timers.set(id, callback); return id; },
         clearTimeout: id => timers.delete(id), requestAnimationFrame: callback => { animation = callback; return 1; } };
     vm.runInNewContext(script, context);
-    return { document, video, location, pending, timers, rect,
+    return { document, video, location, pending, timers, rect, window,
         root: () => elements.find(element => element.id === 'lg-ambilight'),
         canvas: () => elements.find(element => element.tagName === 'canvas'),
         draws: () => draws, tick: () => { now += 1000; intervals.forEach(callback => callback()); },
@@ -55,12 +56,31 @@ function framePixels(pattern) {
 function nums(value) { return String(value).match(/-?\d+(?:\.\d+)?/g).map(Number); }
 function near(actual, expected, tolerance = 0.01) { assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' !~ ' + expected); }
 function marginFor(w, h) { return Math.min(230, Math.max(48, Math.min(w, h) * 0.34)); }
-test('automatic startup clips the sidebar and punches a video-shaped hole', () => {
+test('glow is painted behind the page and not clipped away from the sidebar', () => {
     const app = harness();
     assert.ok(Number(app.root().style.opacity) > 0);
-    assert.equal(app.root().style.clipPath, 'inset(0px 386px 0px 0px)');
+    assert.match(app.root().style.cssText, /position:absolute/);
+    assert.match(app.root().style.cssText, /z-index:-1/);
+    assert.equal(app.root().style.clipPath, undefined);
+    assert.equal(app.root().style.maskImage, undefined);
     assert.match(app.canvas().style.clipPath, /^polygon\(evenodd/);
     assert.equal(app.pending.size, 1);
+});
+test('hole stays inside the rounded video so corners and edges keep their glow', () => {
+    const app = harness({ radius: 16 });
+    const margin = marginFor(800, 450);
+    const hole = nums(app.canvas().style.clipPath).slice(10);
+    near(hole[0], margin + 18); near(hole[1], margin + 18);
+    near(hole[4], margin + 800 - 18); near(hole[5], margin + 450 - 18);
+});
+test('canvas uses document coordinates so scrolling needs no repositioning', () => {
+    const app = harness({ scrollY: 300 });
+    const margin = marginFor(800, 450);
+    near(parseFloat(app.canvas().style.top), 120 + 300 - margin);
+    const before = app.canvas().style.top;
+    // Scrolling by 100px moves the viewport rect but not the page position.
+    app.window.scrollY = 400; app.rect.top = 20; app.rect.bottom = 470; app.scroll();
+    assert.equal(app.canvas().style.top, before);
 });
 test('hidden document cancels callback including callback ID zero', () => {
     const app = harness(); app.document.hidden = true; app.emit('visibilitychange');
@@ -107,8 +127,8 @@ test('letterboxed video places canvas and hole over the content rect', () => {
     near(parseFloat(app.canvas().style.width), contentWidth + margin * 2);
     near(parseFloat(app.canvas().style.height), contentHeight + margin * 2);
     const hole = nums(app.canvas().style.clipPath).slice(10);
-    near(hole[0], margin - 1); near(hole[1], margin - 1);
-    near(hole[4], margin + contentWidth + 1); near(hole[5], margin + contentHeight + 1);
+    near(hole[0], margin + 18); near(hole[1], margin + 18);
+    near(hole[4], margin + contentWidth - 18); near(hole[5], margin + contentHeight - 18);
     assert.ok(contentHeight < 450 - 1, 'content rect must be shorter than the element rect');
     assert.ok(Number(app.root().style.opacity) > 0);
 });
@@ -127,7 +147,7 @@ test('glow canvas carries no corner-killing radial mask', () => {
     const app = harness();
     assert.ok(!/radial/.test(app.canvas().style.cssText || ''));
     assert.equal(app.canvas().style.maskImage, undefined);
-    assert.match(app.root().style.maskImage, /^linear-gradient/);
+    assert.equal(app.root().style.maskImage, undefined);
 });
 test('asymmetric dark edge is not treated as a bar', () => {
     const app = harness({ pixels: framePixels((row, col) => (col < 20 ? 0 : 100)) });

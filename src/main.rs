@@ -2,7 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ambient;
-mod analytics;
 mod discord;
 mod extension;
 mod features;
@@ -72,7 +71,7 @@ fn main() -> wry::Result<()> {
     // profile the running instance is using.
     extension::purge_harmful_extensions_from_profile();
 
-    // User prefs (theme/ads/analytics/always-on-top/close-to-tray). Loaded once
+    // User prefs (theme/ads/always-on-top/close-to-tray). Loaded once
     // here; the tray menu seeds its check items from it, and live toggles write
     // back into the same Settings instance over the run.
     let mut settings = settings::load();
@@ -160,12 +159,11 @@ fn main() -> wry::Result<()> {
     // Version banner in the page's DevTools console - the first thing to
     // check when debugging "which build am I even running".
     parts.push(format!(
-        "console.log('%cYouTube Glass v{v}%c  theme={t} ads={a} analytics={an} cinema={c} rpc={r}', \
+        "console.log('%cYouTube Glass v{v}%c  theme={t} ads={a} cinema={c} rpc={r}', \
          'background:#f1f1f1;color:#0d0d0d;padding:2px 8px;border-radius:6px;font-weight:600', '');",
         v = env!("CARGO_PKG_VERSION"),
         t = settings.theme,
         a = settings.block_ads,
-        an = settings.analytics,
         c = settings.cinema,
         r = settings.discord_rpc,
     ));
@@ -185,14 +183,10 @@ fn main() -> wry::Result<()> {
         false,
     ));
     parts.push(youtube_only(include_str!("player_extras.js"), false));
-    if settings.analytics {
-        parts.push(youtube_only(analytics::script(), false));
-    }
     let init_script = parts.join("\n");
     logging::log(format!(
-        "init scripts registered separately: theme={} analytics={} ({} bytes combined)",
+        "init scripts registered separately: theme={} ({} bytes combined)",
         settings.theme,
-        settings.analytics,
         init_script.len()
     ));
 
@@ -502,9 +496,6 @@ fn main() -> wry::Result<()> {
                     } else if menu_event.id == *t.block_ads_item.id() {
                         settings.block_ads = t.block_ads_item.is_checked();
                         settings::save(&settings);
-                    } else if menu_event.id == *t.analytics_item.id() {
-                        settings.analytics = t.analytics_item.is_checked();
-                        settings::save(&settings);
                     } else if menu_event.id == *t.cinema_item.id() {
                         settings.cinema = t.cinema_item.is_checked();
                         settings::save(&settings);
@@ -577,12 +568,6 @@ fn main() -> wry::Result<()> {
                                 settings.block_ads = on;
                                 if let Some(t) = &tray {
                                     t.block_ads_item.set_checked(on);
-                                }
-                            }
-                            "analytics" => {
-                                settings.analytics = on;
-                                if let Some(t) = &tray {
-                                    t.analytics_item.set_checked(on);
                                 }
                             }
                             "cinema" => {

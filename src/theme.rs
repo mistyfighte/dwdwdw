@@ -218,35 +218,20 @@ ytd-comments#comments, ytd-watch-metadata {
     box-shadow: var(--lg-shadow-soft) !important;
 }
 
-#lg-analytics-panel {
-    background: rgba(24, 24, 24, 0.58) !important;
-    border: 1px solid rgba(255,255,255,0.075) !important;
-    border-radius: 18px !important;
-    box-shadow: 0 16px 44px rgba(0,0,0,0.34) !important;
-    -webkit-backdrop-filter: blur(22px) saturate(1.18) !important;
-    backdrop-filter: blur(22px) saturate(1.18) !important;
-    margin-bottom: 16px !important;
-}
-
-#lg-analytics-panel .lg-an-cell {
-    background: rgba(255,255,255,0.055) !important;
-    border: 1px solid rgba(255,255,255,0.045) !important;
-    border-radius: 10px !important;
-}
-
-#lg-analytics-panel .lg-an-label {
-    color: #bcbcbc !important;
-}
-
-#lg-analytics-panel .lg-an-value {
-    color: #ffffff !important;
-}
-
 .html5-video-player, #player .html5-video-player,
 ytd-player#ytd-player .html5-video-player {
     border-radius: var(--lg-radius) !important;
     overflow: hidden !important;
-    box-shadow: 0 12px 48px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.08) !important;
+    /* No dark drop shadow: the ambilight is painted behind the page, so a
+       shadow would darken exactly the brightest part of the glow. */
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08) !important;
+}
+
+/* Letterbox/pillarbox bars show the ambilight behind the player instead of
+   solid black. Windowed only: fullscreen keeps YouTube's black. */
+ytd-watch-flexy:not([fullscreen]) #movie_player:not(.ytp-fullscreen),
+ytd-watch-flexy:not([fullscreen]) #full-bleed-container {
+    background: transparent !important;
 }
 
 /* YouTube's own cinematic lighting behind the player - superseded by our
@@ -265,12 +250,6 @@ ytd-player#ytd-player .html5-video-player {
 /* Ambilight glow ring (see ambient.rs). */
 #lg-ambilight {
     mix-blend-mode: screen;
-}
-/* The glow layer sits above the masthead/guide layers; hide it while the
-   guide drawer or the search box (with its suggestion list) is in use so it
-   doesn't wash over them. */
-html:has(tp-yt-app-drawer#guide[opened], #masthead-container:focus-within) #lg-ambilight {
-    opacity: 0 !important;
 }
 
 #player-container-inner, #player-container, #player, #player-wrap,
@@ -312,9 +291,11 @@ ytd-menu-popup-renderer, tp-yt-paper-dialog {
     box-shadow: var(--lg-shadow-soft);
 }
 
-ytd-watch-flexy[fullscreen] .html5-video-player,
-ytd-watch-flexy[theater] .html5-video-player,
-.html5-video-player.ytp-fullscreen {
+/* Two ids so these beat `ytd-player#ytd-player .html5-video-player` above;
+   with lower specificity the fullscreen player kept rounded corners. */
+ytd-watch-flexy[fullscreen] ytd-player#ytd-player #movie_player,
+ytd-watch-flexy[theater] ytd-player#ytd-player #movie_player,
+ytd-player#ytd-player #movie_player.ytp-fullscreen {
     border-radius: 0 !important;
     box-shadow: none !important;
 }

@@ -3,10 +3,10 @@
 //! restores the window; "Quit" actually exits.
 //!
 //! The menu also carries the app's user-facing toggles (theme, ad block,
-//! analytics, cinema, always-on-top, close-to-tray) as check items. Their
+//! cinema, always-on-top, close-to-tray) as check items. Their
 //! initial checked state comes from the loaded `Settings`; the live ones
 //! (always-on-top, close-to-tray) take effect immediately via event-loop
-//! callbacks, the init-script ones (theme/ads/analytics/cinema) are picked up
+//! callbacks, the init-script ones (theme/ads/cinema) are picked up
 //! on the next launch via "Restart".
 
 use tray_icon::{
@@ -28,12 +28,11 @@ pub struct TrayHandle {
     pub always_on_top_item: CheckMenuItem,
     /// Live toggle: controls whether CloseRequested hides or quits.
     pub close_to_tray_item: CheckMenuItem,
-    /// Apply-on-restart toggles (theme / ad block / analytics / cinema). Their
+    /// Apply-on-restart toggles (theme / ad block / cinema). Their
     /// checked state is read back into Settings on click; the effect lands next
     /// launch.
     pub theme_item: CheckMenuItem,
     pub block_ads_item: CheckMenuItem,
-    pub analytics_item: CheckMenuItem,
     pub cinema_item: CheckMenuItem,
 }
 
@@ -70,8 +69,6 @@ where
     let theme_item = CheckMenuItem::new("Тема Liquid Glass", true, settings.theme, None);
     let block_ads_item =
         CheckMenuItem::new("Скрывать рекламные баннеры", true, settings.block_ads, None);
-    let analytics_item =
-        CheckMenuItem::new("Аналитика видео", true, settings.analytics, None);
     let cinema_item = CheckMenuItem::new("Режим кинотеатра", true, settings.cinema, None);
     let always_on_top_item =
         CheckMenuItem::new("Поверх всех окон", true, settings.always_on_top, None);
@@ -85,7 +82,6 @@ where
         &PredefinedMenuItem::separator(),
         &theme_item,
         &block_ads_item,
-        &analytics_item,
         &cinema_item,
         &always_on_top_item,
         &close_to_tray_item,
@@ -119,7 +115,6 @@ where
         close_to_tray_item,
         theme_item,
         block_ads_item,
-        analytics_item,
         cinema_item,
     })
 }
