@@ -380,8 +380,58 @@ yt-chip-cloud-chip-renderer:not([selected]):hover {
     background: rgba(255,255,255,0.14) !important;
 }
 
+/* Menus, dropdowns and tooltips open with a short fade + lift instead of
+   popping in. Opacity/transform only, so it stays on the compositor. */
+@keyframes lg-pop-in {
+    from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+}
+tp-yt-iron-dropdown #contentWrapper > *, ytd-menu-popup-renderer, ytd-multi-page-menu-renderer,
+yt-sheet-view-model, tp-yt-paper-tooltip #tooltip, .ytp-settings-menu, .ytp-popup {
+    animation: lg-pop-in .16s var(--lg-ease) both;
+}
+/* New feed items (infinite scroll, first render) rise in. */
+@keyframes lg-rise {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: none; }
+}
+ytd-rich-grid-renderer #contents > ytd-rich-item-renderer,
+ytd-item-section-renderer > #contents > :is(ytd-video-renderer, ytd-compact-video-renderer),
+ytd-watch-next-secondary-results-renderer #items > ytd-compact-video-renderer,
+yt-lockup-view-model {
+    animation: lg-rise .42s var(--lg-ease) both;
+}
+/* Buttons: smooth hover, a small press, and a pop on like/dislike. */
+:is(yt-button-shape, ytd-button-renderer, ytd-toggle-button-renderer) button,
+.yt-spec-button-shape-next, .ytSpecButtonShapeNextHost {
+    transition: background-color .18s var(--lg-ease), transform .16s var(--lg-ease), color .18s var(--lg-ease) !important;
+}
+:is(.yt-spec-button-shape-next, .ytSpecButtonShapeNextHost):active {
+    transform: scale(0.96);
+}
+@keyframes lg-like-pop { 0% { transform: scale(1); } 40% { transform: scale(1.18); } 100% { transform: scale(1); } }
+:is(like-button-view-model, dislike-button-view-model) button[aria-pressed="true"] yt-icon {
+    animation: lg-like-pop .36s var(--lg-ease);
+}
+ytd-searchbox#search { transition: background-color .2s var(--lg-ease), box-shadow .25s var(--lg-ease) !important; }
+ytd-searchbox#search:focus-within { box-shadow: 0 0 0 1px rgba(255,255,255,0.18), 0 8px 30px rgba(0,0,0,0.45) !important; }
+/* The seek bar grows smoothly on hover like YouTube's own. */
+.ytp-progress-bar-container .ytp-progress-list, .ytp-scrubber-container { transition: transform .15s var(--lg-ease); }
+/* Long comment sections: skip layout/paint of threads far off screen. */
+ytd-comment-thread-renderer {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 140px;
+}
+
 @media (prefers-reduced-motion: reduce) {
     ytd-page-manager > * { animation: none !important; }
+    tp-yt-iron-dropdown #contentWrapper > *, ytd-menu-popup-renderer, ytd-multi-page-menu-renderer,
+    yt-sheet-view-model, tp-yt-paper-tooltip #tooltip, .ytp-settings-menu, .ytp-popup,
+    ytd-rich-grid-renderer #contents > ytd-rich-item-renderer,
+    ytd-item-section-renderer > #contents > :is(ytd-video-renderer, ytd-compact-video-renderer),
+    ytd-watch-next-secondary-results-renderer #items > ytd-compact-video-renderer, yt-lockup-view-model,
+    :is(like-button-view-model, dislike-button-view-model) button[aria-pressed="true"] yt-icon { animation: none !important; }
+    :is(.yt-spec-button-shape-next, .ytSpecButtonShapeNextHost):active { transform: none; }
     :is(ytd-rich-item-renderer, ytd-compact-video-renderer, ytd-video-renderer):hover ytd-thumbnail { transform: none; }
     :is(ytd-app, yt-app) :is(ytd-thumbnail, yt-chip-cloud-chip-renderer, ytd-guide-entry-renderer, button, a) {
         transition: none !important;

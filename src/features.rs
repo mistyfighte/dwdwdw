@@ -29,199 +29,19 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         var CINEMA = {cinema_js};
         var PREFER_HD = {prefer_hd_js};
 
-        // ---------- audio enhancement: equalizer + compressor ----------
-        // Routing the <video> through a Web Audio graph lets us shape it with a
-        // 5-band EQ and a gentle compressor (loudness normalization: quiet
-        // dialogue comes up, sharp transients get tamed - good for cinema and
-        // noisy mixes). Caveat: once a MediaElementAudioSourceNode is created
-        // for an element it can't be removed, and the element's own
-        // volume/muted stop reaching the output - so dedicated gains mirror
-        // them back in (see the volumechange listener in trackVideoElement).
-        var EQ_BANDS = [60, 230, 910, 3600, 14000];
-        // Each preset: 5 band gains (dB) + its own compressor curve. `comp:
-        // null` = transparent (ratio 1) - EQ colour without dynamics.
-        // 'night' is the "bad speakers / late night" mode: hard limiting so
-        // whispers and explosions land at the same level; 'voice' pushes
-        // speech intelligibility for podcasts/interviews on laptop speakers.
-        var GENTLE = {{ threshold: -22, knee: 28, ratio: 3.5, attack: 0.004, release: 0.30 }};
-        var PRESETS = {{
-            flat:   {{ gains: [0, 0, 0, 0, 0],   comp: null }},
-            bass:   {{ gains: [9, 6, 1, -1, -2], comp: null }},
-            vocal:  {{ gains: [-2, -1, 4, 3, 1], comp: GENTLE }},
-            cinema: {{ gains: [5, 2, 0, 2, 4],   comp: GENTLE }},
-            treble: {{ gains: [-2, -1, 0, 4, 8], comp: null }},
-            voice:  {{ gains: [-6, -2, 5, 6, 0],
-                       comp: {{ threshold: -28, knee: 20, ratio: 5, attack: 0.003, release: 0.25 }} }},
-            night:  {{ gains: [-4, 0, 3, 2, -2],
-                       comp: {{ threshold: -38, knee: 12, ratio: 12, attack: 0.002, release: 0.40 }} }},
-            // Headphones: the stereo pair played from two virtual speakers
-            // at +-30 degrees through the browser's HRTF (as Windows Sonic /
-            // Dolby Atmos for Headphones do for stereo), a touch of air on top.
-            spatial: {{ gains: [2, 0, 0, 1, 2], comp: null, spatial: true }},
-        }};
-        var PRESET_ORDER = ['flat', 'bass', 'vocal', 'cinema', 'spatial', 'treble', 'voice', 'night'];
-        var PRESET_LABEL = {{
-            flat: 'Нейтрально', bass: 'Бас', vocal: 'Вокал',
-            cinema: 'Кино', spatial: 'Пространство', treble: 'Высокие',
-            voice: 'Речь', night: 'Ночной',
-        }};
-        var audio = {{ ctx: null, src: null, bands: [], comp: null, compWet: null, compDry: null,
-                       spatialWet: null, spatialDry: null,
-                       muteGain: null, master: null, attached: null }};
-
-        function savedAudioPreset() {{
-            try {{ return localStorage.getItem('lg-audio-preset') || 'off'; }}
-            catch (e) {{ return 'off'; }}
+        // ---------- audio presets (audio_engine.js) ----------
+        // The engine owns the Web Audio graph; this file only offers its
+        // presets in the player UI and the Ctrl+Shift+E hotkey.
+        function engine() {{ return window.__ygAudio || null; }}
+        var PRESET_ORDER = engine() ? engine().order : [];
+        function presetLabel(name) {{ return engine() ? engine().label(name) : name; }}
+        function presetDesc(name) {{
+            if (name === 'off') return 'Без обработки';
+            var p = engine() && engine().presets[name];
+            return p ? p.desc : '';
         }}
-
-        function buildAudioGraph(v) {{
-            if (audio.attached === v) return;
-            // A MediaElementAudioSourceNode is one-shot per element: a second
-            // createMediaElementSource() throws. Guard so a re-attach after we
-            // lost track never breaks sound entirely.
-            if (v.dataset.lgAudioBound === '1') return;
-            v.dataset.lgAudioBound = '1';
-            var AC = window.AudioContext || window.webkitAudioContext;
-            if (!AC) return;
-            try {{ audio.ctx = new AC(); }} catch (e) {{ return; }}
-            audio.src = audio.ctx.createMediaElementSource(v);
-            audio.bands = EQ_BANDS.map(function (freq, i) {{
-                var f = audio.ctx.createBiquadFilter();
-                f.type = i === 0 ? 'lowshelf'
-                       : i === EQ_BANDS.length - 1 ? 'highshelf'
-                       : 'peaking';
-                f.frequency.value = freq;
-                f.Q.value = 1.0;
-                f.gain.value = 0;
-                return f;
-            }});
-            var node = audio.src;
-            audio.bands.forEach(function (b) {{ node.connect(b); node = b; }});
-            // All of the source's channels reach the output device: the
-            // destination defaults to 2 and would fold 5.1/7.1 down to stereo
-            // before Windows (speaker setup or spatial sound) ever sees it.
-            try {{
-                var dest = audio.ctx.destination;
-                dest.channelCount = Math.max(2, Math.min(8, dest.maxChannelCount || 2));
-                dest.channelInterpretation = 'speakers';
-            }} catch (e) {{}}
-            audio.comp = audio.ctx.createDynamicsCompressor();
-            audio.comp.threshold.value = -22;
-            audio.comp.knee.value = 28;
-            audio.comp.ratio.value = 3.5;
-            audio.comp.attack.value = 0.004;
-            audio.comp.release.value = 0.30;
-            // Compressor and its bypass are separate paths: the compressor
-            // node is stereo-only, so 'off'/multichannel audio skips it
-            // entirely instead of running it at ratio 1.
-            audio.compWet = audio.ctx.createGain();
-            audio.compDry = audio.ctx.createGain();
-            audio.compWet.gain.value = 0;
-            node.connect(audio.comp);
-            node.connect(audio.compDry);
-            audio.comp.connect(audio.compWet);
-            var mixed = audio.ctx.createGain();
-            audio.compWet.connect(mixed);
-            audio.compDry.connect(mixed);
-            // Virtual speakers for headphones (the 'spatial' preset).
-            audio.spatialDry = audio.ctx.createGain();
-            audio.spatialWet = audio.ctx.createGain();
-            audio.spatialWet.gain.value = 0;
-            mixed.connect(audio.spatialDry);
-            var split = audio.ctx.createChannelSplitter(2);
-            mixed.connect(split);
-            [-1, 1].forEach(function (side, index) {{
-                var speaker = audio.ctx.createPanner();
-                speaker.panningModel = 'HRTF';
-                speaker.distanceModel = 'inverse';
-                speaker.refDistance = 1;
-                var x = side * Math.sin(Math.PI / 6), z = -Math.cos(Math.PI / 6);
-                if (speaker.positionX) {{
-                    speaker.positionX.value = x; speaker.positionY.value = 0; speaker.positionZ.value = z;
-                }} else {{
-                    speaker.setPosition(x, 0, z);
-                }}
-                split.connect(speaker, index);
-                speaker.connect(audio.spatialWet);
-            }});
-            // muteGain mirrors video.muted; master mirrors video.volume. Once
-            // the element is routed through the graph these properties stop
-            // affecting output directly, so we reapply them here.
-            audio.muteGain = audio.ctx.createGain();
-            audio.muteGain.gain.value = v.muted ? 0 : 1;
-            audio.spatialDry.connect(audio.muteGain);
-            audio.spatialWet.connect(audio.muteGain);
-            audio.master = audio.ctx.createGain();
-            audio.master.gain.value = v.volume;
-            audio.muteGain.connect(audio.master);
-            audio.master.connect(audio.ctx.destination);
-            audio.attached = v;
-        }}
-
-        // Channels of the track YouTube is playing (media_info.js); stereo
-        // when unknown.
-        function sourceChannels() {{
-            var info = window.__ygMediaInfo && window.__ygMediaInfo.current();
-            return info && info.audio && info.audio.channels || 2;
-        }}
-
-        // Short ramps so switching presets never clicks.
-        function setGain(param, value) {{
-            if (!audio.ctx) return;
-            var t = audio.ctx.currentTime;
-            try {{
-                param.cancelScheduledValues(t);
-                param.setValueAtTime(param.value, t);
-                param.linearRampToValueAtTime(value, t + 0.08);
-            }} catch (e) {{ param.value = value; }}
-        }}
-
-        // Compressor curve into the live node, or a true bypass for null and
-        // for surround sources (the compressor is stereo-only).
-        function applyComp(settings) {{
-            if (!audio.comp) return;
-            var use = !!settings && sourceChannels() <= 2;
-            if (use) {{
-                audio.comp.threshold.value = settings.threshold;
-                audio.comp.knee.value = settings.knee;
-                audio.comp.ratio.value = settings.ratio;
-                audio.comp.attack.value = settings.attack;
-                audio.comp.release.value = settings.release;
-            }}
-            setGain(audio.compWet.gain, use ? 1 : 0);
-            setGain(audio.compDry.gain, use ? 0 : 1);
-        }}
-
-        // Virtual speakers only for stereo; surround goes to the device as is.
-        function applySpatial(on) {{
-            if (!audio.spatialWet) return;
-            var use = !!on && sourceChannels() <= 2;
-            setGain(audio.spatialWet.gain, use ? 0.85 : 0);
-            setGain(audio.spatialDry.gain, use ? 0 : 1);
-        }}
-
-        function applyAudioPreset(name) {{
-            try {{ localStorage.setItem('lg-audio-preset', name); }} catch (e) {{}}
-            var v = document.querySelector('video');
-            if (!v) return;
-            if (name === 'off') {{
-                // Can't destroy the graph (one-shot source node) - flatten it
-                // to transparency instead. Audibly neutral.
-                if (audio.bands.length) audio.bands.forEach(function (b) {{ setGain(b.gain, 0); }});
-                applyComp(null);
-                applySpatial(false);
-                return;
-            }}
-            if (!audio.attached) buildAudioGraph(v);
-            if (!audio.attached) return;
-            var p = PRESETS[name] || PRESETS.flat;
-            audio.bands.forEach(function (b, i) {{ setGain(b.gain, p.gains[i] || 0); }});
-            applyComp(p.comp);
-            applySpatial(p.spatial);
-            if (audio.ctx && audio.ctx.state === 'suspended') {{
-                audio.ctx.resume().catch(function () {{}});
-            }}
-        }}
+        function savedAudioPreset() {{ return engine() ? engine().saved() : 'off'; }}
+        function applyAudioPreset(name) {{ if (engine()) engine().apply(name); }}
 
         function cycleAudioPreset() {{
             var cur = savedAudioPreset();
@@ -230,7 +50,7 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             var next = order[(idx + 1) % order.length];
             applyAudioPreset(next);
             if (eqBtnRefresh) eqBtnRefresh();
-            osdText(next === 'off' ? 'Звук: выкл' : ('Звук: ' + PRESET_LABEL[next]));
+            osdText(next === 'off' ? 'Звук: выкл' : ('Звук: ' + presetLabel(next)));
         }}
 
         // ---------- playback quality preference ----------
@@ -524,18 +344,9 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 reportRpc('pause');
             }});
             reportMedia(!v.paused);
-            // Reattach the audio graph to the new element (SPA navigation can
-            // swap the <video>), then reapply the saved EQ preset.
-            audio.attached = null;
+            // A new <video> (SPA navigation can swap it) gets the saved preset.
             var preset = savedAudioPreset();
             if (preset !== 'off') applyAudioPreset(preset);
-            // video.volume/muted no longer reach the output once the graph is
-            // attached, so mirror them through muteGain/master on every change.
-            v.addEventListener('volumechange', function () {{
-                if (audio.attached !== v) return;
-                if (audio.master) audio.master.gain.value = v.volume;
-                if (audio.muteGain) audio.muteGain.gain.value = v.muted ? 0 : 1;
-            }});
         }}
 
         // ---------- fullscreen scroll lock ----------
@@ -890,12 +701,6 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 'opacity:0;transform:translateY(8px) scale(0.97);transform-origin:100% 100%;' +
                 'transition:opacity .18s cubic-bezier(0.22,1,0.36,1),transform .22s cubic-bezier(0.22,1,0.36,1);';
             var cur = savedAudioPreset();
-            var DESC = {{
-                off: 'Без обработки', flat: 'Только компрессор выкл',
-                bass: 'Глубокий низ', vocal: 'Чистый голос',
-                cinema: 'Объём + динамика', spatial: 'Колонки в наушниках', treble: 'Яркий верх',
-                voice: 'Речь, подкасты', night: 'Тихо и ровно',
-            }};
             ['off'].concat(PRESET_ORDER).forEach(function (name) {{
                 var row = document.createElement('button');
                 row.type = 'button';
@@ -907,9 +712,9 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                     'cursor:pointer;padding:7px 12px;border-radius:9px;' +
                     (on ? 'background:rgba(255,255,255,0.14);' : '');
                 var l = document.createElement('span');
-                l.textContent = name === 'off' ? 'Выкл' : PRESET_LABEL[name];
+                l.textContent = presetLabel(name);
                 var d = document.createElement('span');
-                d.textContent = DESC[name] || '';
+                d.textContent = presetDesc(name);
                 d.style.cssText = 'opacity:0.45;font-weight:400;';
                 row.appendChild(l);
                 row.appendChild(d);
@@ -930,7 +735,7 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                     if (eqBtnRefresh) eqBtnRefresh();
                     closeEqPanel();
                     if (anchorBtn && anchorBtn.isConnected) anchorBtn.focus();
-                    osdText(name === 'off' ? 'Звук: выкл' : ('Звук: ' + PRESET_LABEL[name]));
+                    osdText(name === 'off' ? 'Звук: выкл' : ('Звук: ' + presetLabel(name)));
                 }});
                 panel.appendChild(row);
             }});
@@ -1001,7 +806,7 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 path.setAttribute('d', ICON_EQ);
                 path.style.opacity = active ? '1' : '0.5';
                 btn.title = cur === 'off' ? 'Эквалайзер (выкл)'
-                    : ('Эквалайзер: ' + (PRESET_LABEL[cur] || cur));
+                    : ('Эквалайзер: ' + presetLabel(cur));
                 btn.setAttribute('aria-label', btn.title);
             }}
             eqBtnRefresh = refresh;

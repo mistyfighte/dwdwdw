@@ -183,6 +183,8 @@ fn main() -> wry::Result<()> {
     // consent.youtube.com, our settings page, live-chat/ad iframes. Scope
     // them (see `youtube_only`) so the dark theme can't paint foreign pages
     // dark-on-dark and page logic can't run twice from iframes.
+    // Launch screen first, so it is up before anything else runs.
+    parts.push(youtube_only(include_str!("splash.js"), false));
     if settings.theme {
         // Frames too: the live chat iframe should match the theme.
         parts.push(youtube_only(&theme::injection_script(), true));
@@ -190,6 +192,8 @@ fn main() -> wry::Result<()> {
         // (ambient.rs), so it rides along with the visual theme package.
         parts.push(youtube_only(ambient::injection_script(), false));
     }
+    // Sound engine before features.rs, whose EQ menu lists its presets.
+    parts.push(youtube_only(include_str!("audio_engine.js"), false));
     parts.push(youtube_only(
         &features::script(settings.block_ads, settings.cinema, settings.prefer_hd),
         false,
