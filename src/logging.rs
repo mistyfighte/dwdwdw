@@ -25,6 +25,10 @@ fn write_line(msg: &str, sync: bool) {
             return;
         }
     }
+    // The log was append-only forever; keep one previous generation instead.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+        let _ = std::fs::rename(&path, path.with_extension("log.old"));
+    }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "[{}] {msg}", timestamp());
         if sync {
@@ -34,6 +38,8 @@ fn write_line(msg: &str, sync: bool) {
         }
     }
 }
+
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
 /// Rough `YYYY-MM-DD HH:MM:SS` timestamp without pulling in a datetime crate.
 fn timestamp() -> String {

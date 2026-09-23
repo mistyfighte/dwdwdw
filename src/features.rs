@@ -233,6 +233,10 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                     'box-shadow:0 0 0 200vmax rgba(0,0,0,0.82);' +
                     'opacity:0;transition:opacity 0.7s cubic-bezier(0.22,1,0.36,1);}}' +
                 'html.lg-cinema #lg-cinema-veil{{opacity:1;}}' +
+                // The veil (2100) sits above the masthead (2020) and guide
+                // drawer (2030); lift it while either is actually in use.
+                'html:has(tp-yt-app-drawer#guide[opened],#masthead-container:focus-within) ' +
+                    '#lg-cinema-veil{{opacity:0!important;}}' +
                 '.lg-cinema-btn{{display:inline-flex!important;align-items:center!important;' +
                     'justify-content:center!important;}}' +
                 '.lg-cinema-btn svg{{width:24px!important;height:24px!important;' +
@@ -245,11 +249,15 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         document.addEventListener('readystatechange', addCinemaStyle);
         document.addEventListener('DOMContentLoaded', addCinemaStyle);
 
+        function veilHost() {{
+            return document.querySelector('#player-container-inner') ||
+                   document.querySelector('.html5-video-player');
+        }}
+
         function syncVeil() {{
             var veil = document.getElementById('lg-cinema-veil');
             if (!veil || !document.documentElement.classList.contains('lg-cinema')) return;
-            var host = document.querySelector('#player-container-inner') ||
-                       document.querySelector('.html5-video-player');
+            var host = veilHost();
             if (!host) return;
             var r = host.getBoundingClientRect();
             veil.style.left = r.left + 'px';
@@ -259,6 +267,19 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         }}
         window.addEventListener('resize', syncVeil);
         window.addEventListener('scroll', syncVeil, true);
+        // Theater/default toggles and late layout shifts resize the player
+        // without any window resize/scroll, which left the hole misplaced
+        // (dimming the video itself) until the next 3 s poll.
+        var veilResizeObserver = window.ResizeObserver ? new ResizeObserver(syncVeil) : null;
+        var veilObservedHost = null;
+        function observeVeilHost() {{
+            if (!veilResizeObserver) return;
+            var host = veilHost();
+            if (host === veilObservedHost) return;
+            if (veilObservedHost) veilResizeObserver.unobserve(veilObservedHost);
+            veilObservedHost = host;
+            if (host) veilResizeObserver.observe(host);
+        }}
 
         function setCinema(on) {{
             if (!document.documentElement) return;
@@ -270,7 +291,10 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 document.body.appendChild(veil);
             }}
             document.documentElement.classList.toggle('lg-cinema', want);
-            if (want) syncVeil();
+            if (want) {{
+                observeVeilHost();
+                syncVeil();
+            }}
         }}
         document.addEventListener('yt-navigate-finish', function () {{
             var v = document.querySelector('video');
@@ -290,13 +314,16 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             if (document.querySelector('.lg-cinema-btn')) return;
             var btn = document.createElement('button');
             btn.className = 'ytp-button lg-cinema-btn';
+            btn.type = 'button';
             btn.title = 'Режим кинотеатра';
+            btn.setAttribute('aria-label', 'Режим кинотеатра');
             btn.setAttribute('aria-pressed', String(cinemaUserOn));
             // Delhi-modern player icons are 24px SVGs centered in the 48px
             // button slot (not 100%-fill). Inline width/height="100%" made the
             // moon overflow the pill toggle background and clip on the right.
             var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
             svg.setAttribute('viewBox', '0 0 24 24');
+            svg.setAttribute('aria-hidden', 'true');
             var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             p.setAttribute('fill', '#fff');
             // Material Design "dark_mode" crescent - a real cutout shape, not
@@ -377,24 +404,36 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 return;
             }}
             reportRpc(v.paused ? 'pause' : 'play');
+            reportMedia(!v.paused);
             setCinema(!v.paused);
             syncVeil();
         }}, 3000);
+
+        // SMTC status. The first autoplay usually starts before the listeners
+        // below attach, which left the Now Playing widget "stopped" while
+        // audio was playing; report on attach and from the poll, deduped.
+        var lastMediaState = null;
+        function reportMedia(playing) {{
+            if (!window.ipc || lastMediaState === playing) return;
+            lastMediaState = playing;
+            window.ipc.postMessage(playing ? 'media:play' : 'media:pause');
+        }}
 
         function trackVideoElement() {{
             var v = document.querySelector('video');
             if (!v || v === lastVideo) return;
             lastVideo = v;
             v.addEventListener('play', function () {{
-                if (window.ipc) window.ipc.postMessage('media:play');
+                reportMedia(true);
                 setCinema(true);
                 reportRpc('play');
             }});
             v.addEventListener('pause', function () {{
-                if (window.ipc) window.ipc.postMessage('media:pause');
+                reportMedia(false);
                 setCinema(false);
                 reportRpc('pause');
             }});
+            reportMedia(!v.paused);
             // Reattach the audio graph to the new element (SPA navigation can
             // swap the <video>), then reapply the saved EQ preset.
             audio.attached = null;
@@ -485,6 +524,9 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             trackVideoElement();
             ensureCinemaButton();
             syncFsLock();
+            // The consent lightbox renders long after DOMContentLoaded, so a
+            // one-shot check at startup never found it.
+            ensureConsentButtons();
         }}
 
         // The subtree observer fires hundreds of times per second on a busy
@@ -713,11 +755,13 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         // (the player node can be replaced across SPA navigations).
         function toggleEqPanel(anchorBtn) {{
             var old = document.getElementById('lg-eq-panel');
-            if (old) {{ old.remove(); return; }}
+            if (old) {{ closeEqPanel(); return; }}
             var player = document.querySelector('.html5-video-player');
             if (!player) return;
             var panel = document.createElement('div');
             panel.id = 'lg-eq-panel';
+            panel.setAttribute('role', 'menu');
+            panel.setAttribute('aria-label', 'Эквалайзер');
             panel.style.cssText =
                 'position:absolute;right:12px;bottom:60px;z-index:9999;' +
                 'display:flex;flex-direction:column;gap:2px;min-width:180px;' +
@@ -734,7 +778,10 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             }};
             ['off'].concat(PRESET_ORDER).forEach(function (name) {{
                 var row = document.createElement('button');
+                row.type = 'button';
                 var on = name === cur;
+                row.setAttribute('role', 'menuitemradio');
+                row.setAttribute('aria-checked', String(on));
                 row.style.cssText =
                     'all:unset;display:flex;justify-content:space-between;gap:16px;' +
                     'cursor:pointer;padding:7px 12px;border-radius:9px;' +
@@ -752,35 +799,66 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 row.addEventListener('mouseleave', function () {{
                     row.style.background = on ? 'rgba(255,255,255,0.14)' : '';
                 }});
+                row.addEventListener('focus', function () {{
+                    row.style.outline = '2px solid #a8d4ff';
+                    row.style.outlineOffset = '-2px';
+                }});
+                row.addEventListener('blur', function () {{ row.style.outline = ''; }});
                 row.addEventListener('click', function (e) {{
                     e.stopPropagation();
                     applyAudioPreset(name);
                     if (eqBtnRefresh) eqBtnRefresh();
-                    panel.remove();
+                    closeEqPanel();
+                    if (anchorBtn && anchorBtn.isConnected) anchorBtn.focus();
                     osdText(name === 'off' ? 'Звук: выкл' : ('Звук: ' + PRESET_LABEL[name]));
                 }});
                 panel.appendChild(row);
             }});
+            panel.addEventListener('keydown', function (e) {{
+                if (e.key !== 'Escape') return;
+                e.preventDefault();
+                e.stopPropagation();
+                closeEqPanel();
+                if (anchorBtn && anchorBtn.isConnected) anchorBtn.focus();
+            }});
             player.appendChild(panel);
-            // Any click outside dismisses (deferred so the opening click
-            // itself doesn't instantly close it).
-            setTimeout(function () {{
-                document.addEventListener('click', function dismiss(e) {{
-                    if (!panel.contains(e.target)) {{
-                        panel.remove();
-                        document.removeEventListener('click', dismiss, true);
-                    }}
-                }}, true);
-            }}, 0);
+            if (anchorBtn) anchorBtn.setAttribute('aria-expanded', 'true');
+            // Any click outside dismisses. Clicks on the toggle button are
+            // left to its own handler: dismissing here first made the button
+            // re-open the panel instead of closing it.
+            eqDismiss = function (e) {{
+                if (panel.contains(e.target)) return;
+                if (anchorBtn && anchorBtn.contains(e.target)) return;
+                closeEqPanel();
+            }};
+            document.addEventListener('click', eqDismiss, true);
+            var first = panel.querySelector('[aria-checked="true"]') || panel.firstChild;
+            if (first) first.focus({{ preventScroll: true }});
+        }}
+
+        var eqDismiss = null;
+        function closeEqPanel() {{
+            var panel = document.getElementById('lg-eq-panel');
+            if (panel) panel.remove();
+            if (eqDismiss) {{
+                document.removeEventListener('click', eqDismiss, true);
+                eqDismiss = null;
+            }}
+            var btn = document.querySelector('.lg-audio-btn');
+            if (btn) btn.setAttribute('aria-expanded', 'false');
         }}
 
         function ensureAudioButton(controls) {{
             if (!controls || controls.querySelector('.lg-audio-btn')) return;
             var btn = document.createElement('button');
+            btn.type = 'button';
             btn.className = 'ytp-button lg-audio-btn';
             btn.title = 'Эквалайзер';
+            btn.setAttribute('aria-haspopup', 'menu');
+            btn.setAttribute('aria-expanded', 'false');
             var svg = document.createElementNS(SVG_NS, 'svg');
             svg.setAttribute('viewBox', '0 0 24 24');
+            svg.setAttribute('aria-hidden', 'true');
             var path = document.createElementNS(SVG_NS, 'path');
             path.setAttribute('fill', '#fff');
             svg.appendChild(path);
@@ -792,6 +870,7 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 path.style.opacity = active ? '1' : '0.5';
                 btn.title = cur === 'off' ? 'Эквалайзер (выкл)'
                     : ('Эквалайзер: ' + (PRESET_LABEL[cur] || cur));
+                btn.setAttribute('aria-label', btn.title);
             }}
             eqBtnRefresh = refresh;
             btn.addEventListener('click', function (e) {{
@@ -807,14 +886,35 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         // fullscreen scrolls the page down to comments on wheel, which is
         // never what you want mid-video - volume is. Windowed mode keeps the
         // wheel-over-player requirement so feed scrolling works normally.
+        // Scrollable player popups (quality/speed lists, the EQ panel,
+        // chapters, end-screen overlays) must keep their own wheel scrolling.
+        var WHEEL_PASSTHROUGH = '.ytp-popup, .ytp-settings-menu, .ytp-panel, #lg-eq-panel, ' +
+            '.ytp-chapter-hover-container, .ytp-ce-element, .ytp-suggestion-set, ' +
+            '.ytp-fullscreen-grid, .ytp-modern-videowall-still';
         document.addEventListener('wheel', function (e) {{
+            // Pinch/ctrl+wheel is page zoom; a pure horizontal swipe used to
+            // count as "wheel down" and silently lowered the volume.
+            if (e.ctrlKey || e.deltaY === 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
             var player = document.querySelector('.html5-video-player');
             var v = document.querySelector('video');
             if (!player || !v) return;
             if (!document.fullscreenElement && !player.contains(e.target)) return;
+            if (e.target && e.target.closest && e.target.closest(WHEEL_PASSTHROUGH)) return;
             e.preventDefault();
             e.stopPropagation();
-            var vol = Math.min(1, Math.max(0, v.volume + (e.deltaY < 0 ? 0.05 : -0.05)));
+            var step = e.deltaY < 0 ? 5 : -5;
+            // Go through the player API when possible so YouTube's volume
+            // slider, mute state and remembered volume stay in sync; writing
+            // video.volume directly was overwritten by the player later.
+            if (typeof player.getVolume === 'function' && typeof player.setVolume === 'function') {{
+                var cur = player.getVolume();
+                var next = Math.min(100, Math.max(0, Math.round(cur + step)));
+                player.setVolume(next);
+                if (next > 0 && player.isMuted && player.isMuted() && player.unMute) player.unMute();
+                osdVolume(next / 100);
+                return;
+            }}
+            var vol = Math.min(1, Math.max(0, v.volume + step / 100));
             v.volume = vol;
             if (vol > 0) v.muted = false;
             osdVolume(vol);
@@ -844,6 +944,8 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             var url = 'https://youtu.be/' + m + (t > 0 ? '?t=' + t : '');
             navigator.clipboard.writeText(url).then(function () {{
                 osdText('Ссылка с таймкодом скопирована');
+            }}, function () {{
+                osdText('Не удалось скопировать ссылку');
             }});
         }}, true);
 
@@ -860,6 +962,10 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             // onMutation pipeline alone would miss the API-based path.
             syncFsLock();
         }});
+        // A reload or navigation while fullscreen never delivers the matching
+        // fullscreenchange, which stranded the OS window borderless without a
+        // title bar. A fresh document is never fullscreen, so say so.
+        if (window.ipc && !document.fullscreenElement) window.ipc.postMessage('fs:0');
 
         // ---------- app hotkeys ----------
         // Ctrl+H - home feed, Ctrl+L - focus the search box. Capture phase +

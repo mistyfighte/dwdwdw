@@ -61,12 +61,21 @@ fn main() -> wry::Result<()> {
     logging::install_panic_hook();
     logging::log(format!("YouTube Glass v{} starting", env!("CARGO_PKG_VERSION")));
 
-    extension::purge_harmful_extensions_from_profile();
-
-    // Second launch just activates the first instance's window and exits.
-    let Some(_instance_lock) = single_instance::acquire() else {
+    // Second launch just activates the first instance's window and exits; a
+    // self-restart waits for the previous instance to release the lock.
+    let restarted = std::env::args().any(|a| a == single_instance::RESTART_ARG);
+    let Some(_instance_lock) = single_instance::acquire(restarted) else {
         return Ok(());
     };
+
+    // Only after the lock: a second launch must not delete files out of the
+    // profile the running instance is using.
+    extension::purge_harmful_extensions_from_profile();
+
+    // User prefs (theme/ads/analytics/always-on-top/close-to-tray). Loaded once
+    // here; the tray menu seeds its check items from it, and live toggles write
+    // back into the same Settings instance over the run.
+    let mut settings = settings::load();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -84,7 +93,9 @@ fn main() -> wry::Result<()> {
     let window = Rc::new(
         WindowBuilder::new()
             .with_title("YouTube")
-            .with_theme(Some(Theme::Dark))
+            // Dark window chrome is part of the Liquid Glass theme; with the
+            // theme off, follow the system setting.
+            .with_theme(settings.theme.then_some(Theme::Dark))
             .with_window_icon(Some(icon::youtube_icon(128)))
             .with_window_classname(single_instance::WINDOW_CLASS_NAME)
             .with_inner_size(PhysicalSize::new(saved.width, saved.height))
@@ -97,17 +108,15 @@ fn main() -> wry::Result<()> {
         window.set_maximized(true);
     }
 
-    // User prefs (theme/ads/analytics/always-on-top/close-to-tray). Loaded once
-    // here; the tray menu seeds its check items from it, and live toggles write
-    // back into the same Settings instance over the run.
-    let mut settings = settings::load();
     if settings.always_on_top {
         window.set_always_on_top(true);
     }
 
     // Tint the native caption to match the theme instead of replacing it with
     // custom-drawn chrome (see titlebar.rs for why).
-    titlebar::apply(window.hwnd());
+    if settings.theme {
+        titlebar::apply(window.hwnd());
+    }
 
     // `None` if the notification area is unavailable - closing the window
     // then quits normally instead of hiding it with no way back.
@@ -160,16 +169,24 @@ fn main() -> wry::Result<()> {
         c = settings.cinema,
         r = settings.discord_rpc,
     ));
+    // WebView2 runs init scripts in every document and frame: Google sign-in,
+    // consent.youtube.com, our settings page, live-chat/ad iframes. Scope
+    // them (see `youtube_only`) so the dark theme can't paint foreign pages
+    // dark-on-dark and page logic can't run twice from iframes.
     if settings.theme {
-        parts.push(theme::injection_script());
+        // Frames too: the live chat iframe should match the theme.
+        parts.push(youtube_only(&theme::injection_script(), true));
         // Ambilight backlight: derives its colors from the live video frames
         // (ambient.rs), so it rides along with the visual theme package.
-        parts.push(ambient::injection_script().to_string());
+        parts.push(youtube_only(ambient::injection_script(), false));
     }
-    parts.push(features::script(settings.block_ads, settings.cinema, settings.prefer_hd));
-    parts.push(include_str!("player_extras.js").to_string());
+    parts.push(youtube_only(
+        &features::script(settings.block_ads, settings.cinema, settings.prefer_hd),
+        false,
+    ));
+    parts.push(youtube_only(include_str!("player_extras.js"), false));
     if settings.analytics {
-        parts.push(analytics::script().to_string());
+        parts.push(youtube_only(analytics::script(), false));
     }
     let init_script = parts.join("\n");
     logging::log(format!(
@@ -429,6 +446,11 @@ fn main() -> wry::Result<()> {
                 event: WindowEvent::Resized(_) | WindowEvent::Moved(_),
                 ..
             } => {
+                // Minimized windows report a (-32000, -32000) position and a
+                // zero size; keep the last real geometry instead.
+                if event_window.is_minimized() {
+                    return;
+                }
                 geometry.maximized = event_window.is_maximized();
                 if !geometry.maximized {
                     if let Ok(pos) = event_window.outer_position() {
@@ -458,6 +480,8 @@ fn main() -> wry::Result<()> {
                     } else if menu_event.id == t.settings_item_id {
                         event_window.set_visible(true);
                         event_window.set_focus();
+                        // Leaving the page never fires fullscreenchange.
+                        event_window.set_fullscreen(None);
                         let url = format!("http://{}/settings", settings::SETTINGS_HOST);
                         if let Err(e) = webview.load_url(&url) {
                             logging::log(format!("settings page load failed: {e}"));
@@ -486,18 +510,11 @@ fn main() -> wry::Result<()> {
                         settings::save(&settings);
                     } else if menu_event.id == t.restart_item_id {
                         // Init-script toggles only apply at WebView creation,
-                        // so relaunch a fresh copy of ourselves. single_instance
-                        // will block this child until our mutex releases on
-                        // exit - that's the intended handoff.
+                        // so relaunch a fresh copy of ourselves (it waits for
+                        // our instance lock to be released - see relaunch()).
                         window_state::save(geometry);
                         settings::save(&settings);
-                        if let Ok(exe) = std::env::current_exe() {
-                            if std::process::Command::new(exe).spawn().is_err() {
-                                logging::log("restart: failed to spawn new instance".to_string());
-                            }
-                        } else {
-                            logging::log("restart: current_exe unavailable".to_string());
-                        }
+                        relaunch();
                         *control_flow = ControlFlow::Exit;
                     } else if menu_event.id == t.quit_item_id {
                         window_state::save(geometry);
@@ -536,17 +553,9 @@ fn main() -> wry::Result<()> {
                     let _ = webview.load_url("https://www.youtube.com");
                 } else if cmd == "restart" {
                     // Relaunch a fresh copy so init-script toggles take effect.
-                    // single_instance blocks this child until our mutex
-                    // releases on exit - that's the intended handoff.
                     window_state::save(geometry);
                     settings::save(&settings);
-                    if let Ok(exe) = std::env::current_exe() {
-                        if std::process::Command::new(exe).spawn().is_err() {
-                            logging::log("restart: failed to spawn new instance".to_string());
-                        }
-                    } else {
-                        logging::log("restart: current_exe unavailable".to_string());
-                    }
+                    relaunch();
                     *control_flow = ControlFlow::Exit;
                 } else if let Some(rest) = cmd.strip_prefix("set:") {
                     // `set:key=value` from the settings page. Live keys
@@ -556,9 +565,26 @@ fn main() -> wry::Result<()> {
                     if let Some((key, val)) = rest.split_once('=') {
                         let on = val == "1" || val.eq_ignore_ascii_case("true");
                         match key {
-                            "theme" => settings.theme = on,
-                            "block_ads" => settings.block_ads = on,
-                            "analytics" => settings.analytics = on,
+                            // Keep the tray check items in sync; a stale
+                            // checkmark flipped the pref back on next click.
+                            "theme" => {
+                                settings.theme = on;
+                                if let Some(t) = &tray {
+                                    t.theme_item.set_checked(on);
+                                }
+                            }
+                            "block_ads" => {
+                                settings.block_ads = on;
+                                if let Some(t) = &tray {
+                                    t.block_ads_item.set_checked(on);
+                                }
+                            }
+                            "analytics" => {
+                                settings.analytics = on;
+                                if let Some(t) = &tray {
+                                    t.analytics_item.set_checked(on);
+                                }
+                            }
                             "cinema" => {
                                 settings.cinema = on;
                                 if let Some(t) = &tray {
@@ -595,4 +621,30 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+/// Spawns a fresh copy of the app for "Restart". The flag makes the child wait
+/// for this instance's lock instead of exiting as a duplicate launch.
+fn relaunch() {
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Err(e) = std::process::Command::new(exe)
+                .arg(single_instance::RESTART_ARG)
+                .spawn()
+            {
+                logging::log(format!("restart: failed to spawn new instance: {e}"));
+            }
+        }
+        Err(e) => logging::log(format!("restart: current_exe unavailable: {e}")),
+    }
+}
+
+/// Wraps a page script so it only runs on the YouTube web app itself
+/// (`www.`/`m.`/bare youtube.com) and, unless `frames` is set, only in the
+/// top-level document.
+fn youtube_only(script: &str, frames: bool) -> String {
+    let frame_check = if frames { "" } else { " && window === window.top" };
+    format!(
+        "if (/^(?:www\\.|m\\.)?youtube\\.com$/.test(location.hostname){frame_check}) {{\n{script}\n}}\n"
+    )
 }

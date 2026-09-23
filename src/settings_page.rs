@@ -17,10 +17,31 @@ pub fn handle(path: &str, current_json: &str) -> Option<(u16, &'static str, Vec<
     // Only two resources: the page itself at `/` (or `/settings`), and the
     // JSON state at `/state`. Anything else 404s (and the page shows an
     // error) rather than serving something stale.
-    match path {
-        "" | "/" | "/settings" => Some((200, "text/html; charset=utf-8", page_html().into())),
-        "/state" => Some((200, "application/json", current_json.as_bytes().to_vec())),
+    // Normalized here because the caller strips the leading '/': matching
+    // only "/settings" and "/state" made both routes 404, so the page never
+    // opened from the tray.
+    match path.trim_matches('/') {
+        "" | "settings" => Some((200, "text/html; charset=utf-8", page_html().into())),
+        "state" => Some((200, "application/json", current_json.as_bytes().to_vec())),
         _ => Some((404, "text/plain", b"not found".to_vec())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle;
+
+    #[test]
+    fn routes_accept_paths_with_and_without_leading_slash() {
+        for page in ["", "/", "settings", "/settings", "settings/"] {
+            assert_eq!(handle(page, "{}").unwrap().0, 200, "{page:?}");
+        }
+        for state in ["state", "/state"] {
+            let (status, mime, body) = handle(state, "{\"theme\":true}").unwrap();
+            assert_eq!((status, mime), (200, "application/json"));
+            assert_eq!(body, b"{\"theme\":true}");
+        }
+        assert_eq!(handle("missing", "{}").unwrap().0, 404);
     }
 }
 

@@ -31,13 +31,28 @@ pub fn injection_script() -> String {
                 if (!h.hasAttribute('dark')) h.setAttribute('dark', '');
             }}
 
+            // The palette only works on YouTube's dark variables. YouTube
+            // removes `dark` itself (light account preference, appearance
+            // menu), which left dark-on-dark text until the next navigation.
+            var darkObserved = false;
+            function observeDark() {{
+                if (darkObserved || !document.documentElement) return;
+                darkObserved = true;
+                new MutationObserver(forceDark).observe(document.documentElement, {{
+                    attributes: true,
+                    attributeFilter: ['dark'],
+                }});
+            }}
+
             function onNav() {{
                 injectCSS();
                 forceDark();
+                observeDark();
             }}
 
             injectCSS();
             forceDark();
+            observeDark();
             document.addEventListener('readystatechange', onNav);
             document.addEventListener('DOMContentLoaded', onNav);
             document.addEventListener('yt-navigate-finish', onNav);
@@ -81,7 +96,7 @@ const CSS: &str = r#"
     --lg-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-html[dark], html {
+html {
     color-scheme: dark !important;
     --yt-spec-base-background: #0a0a0a !important;
     --yt-spec-raised-background: #202020 !important;
@@ -92,11 +107,20 @@ html[dark], html {
     --yt-spec-general-background-c: transparent !important;
 }
 
-html, body, ytd-app, yt-app {
+/* The backdrop is a fixed pseudo-element on <body> in the root stacking
+   context. The previous variant hung it off ytd-app with z-index:-1, which
+   required ytd-app to be a stacking context (isolation + z-index:1). That
+   trapped YouTube's dialogs and menus (z-index ~2202) below body-level layers
+   - the modal backdrop, cinema veil and ambilight - so dialogs were dimmed
+   and unclickable. Never make ytd-app a stacking context again. */
+html {
     background: #0a0a0a !important;
     background-color: #0a0a0a !important;
 }
-ytd-app::before, yt-app::before {
+body {
+    background: transparent !important;
+}
+body::before {
     content: "";
     position: fixed;
     inset: 0;
@@ -111,12 +135,6 @@ ytd-app, yt-app, #content, #page-manager, ytd-page-manager, ytd-browse,
 ytd-watch-flexy, #primary, #secondary, #related {
     background: transparent !important;
     background-color: transparent !important;
-}
-
-ytd-app, yt-app {
-    position: relative !important;
-    isolation: isolate !important;
-    z-index: 1 !important;
 }
 
 ytd-watch-flexy:not([fullscreen]) #columns::before {
@@ -247,6 +265,12 @@ ytd-player#ytd-player .html5-video-player {
 /* Ambilight glow ring (see ambient.rs). */
 #lg-ambilight {
     mix-blend-mode: screen;
+}
+/* The glow layer sits above the masthead/guide layers; hide it while the
+   guide drawer or the search box (with its suggestion list) is in use so it
+   doesn't wash over them. */
+html:has(tp-yt-app-drawer#guide[opened], #masthead-container:focus-within) #lg-ambilight {
+    opacity: 0 !important;
 }
 
 #player-container-inner, #player-container, #player, #player-wrap,

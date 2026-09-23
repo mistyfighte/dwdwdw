@@ -201,6 +201,14 @@ pub fn script() -> &'static str {
                     (doneEarly && collect().dislikes != null)) stopTimer();
             }, 700);
         }
+        // Drop the previous video's numbers as soon as navigation starts:
+        // YouTube reuses the watch DOM, so the old card (and old like-button
+        // labels) otherwise showed stale stats for the next video.
+        document.addEventListener('yt-navigate-start', function () {
+            stopTimer();
+            var old = document.getElementById(PANEL_ID);
+            if (old) old.remove();
+        });
         document.addEventListener('yt-navigate-finish', schedule);
         document.addEventListener('DOMContentLoaded', schedule);
         schedule();

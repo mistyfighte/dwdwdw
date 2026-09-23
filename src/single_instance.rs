@@ -31,24 +31,53 @@ impl Drop for InstanceLock {
 /// and returns `None` (caller should exit immediately without creating any
 /// window). Otherwise returns `Some(lock)` and the caller should proceed
 /// with normal startup.
-pub fn acquire() -> Option<InstanceLock> {
+///
+/// `wait` is set for a self-restart: the previous instance still holds the
+/// mutex while it shuts down, so the new one must wait for it instead of
+/// treating it as a second launch (which made "Restart" simply quit).
+pub fn acquire(wait: bool) -> Option<InstanceLock> {
+    let deadline = std::time::Instant::now() + RESTART_WAIT;
+    loop {
+        match try_acquire() {
+            Acquire::Locked(lock) => return Some(lock),
+            Acquire::Busy if wait && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Acquire::Busy => {
+                activate_existing();
+                return None;
+            }
+        }
+    }
+}
+
+/// Command-line flag passed to the relaunched copy on restart.
+pub const RESTART_ARG: &str = "--restarted";
+
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+enum Acquire {
+    Locked(InstanceLock),
+    Busy,
+}
+
+fn try_acquire() -> Acquire {
     let name = HSTRING::from(MUTEX_NAME);
     let handle = unsafe { CreateMutexW(None, false, &name) };
 
     let Ok(handle) = handle else {
         // Couldn't even create the mutex; fail open rather than block startup.
-        return Some(InstanceLock(HANDLE::default()));
+        return Acquire::Locked(InstanceLock(HANDLE::default()));
     };
 
     if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
-        activate_existing();
         unsafe {
             let _ = CloseHandle(handle);
         }
-        return None;
+        return Acquire::Busy;
     }
 
-    Some(InstanceLock(handle))
+    Acquire::Locked(InstanceLock(handle))
 }
 
 fn activate_existing() {
