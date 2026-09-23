@@ -11,14 +11,22 @@
             toast = document.createElement('div');
             toast.id = 'yg-player-notice';
             toast.setAttribute('role', 'status');
-            toast.style.cssText = 'position:fixed;bottom:84px;left:50%;transform:translateX(-50%);max-width:80vw;padding:12px 20px;border-radius:14px;background:rgba(18,22,30,.95);color:#f4f7fc;border:1px solid #ffffff25;box-shadow:0 8px 32px #0006;font:14px Segoe UI,sans-serif;pointer-events:none;z-index:99999;text-align:center;';
+            toast.style.cssText = 'position:fixed;bottom:84px;left:50%;transform:translateX(-50%) translateY(10px);max-width:80vw;padding:12px 20px;border-radius:14px;background:rgba(18,18,18,.92);backdrop-filter:blur(14px);color:#f5f5f5;border:1px solid rgba(255,255,255,.1);box-shadow:0 12px 40px rgba(0,0,0,.55);font:500 14px "Roboto","Segoe UI",sans-serif;pointer-events:none;z-index:99999;text-align:center;opacity:0;' +
+                (matchMedia('(prefers-reduced-motion: reduce)').matches ? '' : 'transition:opacity .25s cubic-bezier(.22,1,.36,1),transform .25s cubic-bezier(.22,1,.36,1);');
         }
         const host = document.fullscreenElement || document.body;
         if (toast.parentElement !== host) host.appendChild(toast);
         toast.textContent = message;
-        toast.hidden = false;
+        // Next frame, so a freshly attached toast animates in too.
+        requestAnimationFrame(function () {
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateX(-50%) translateY(0)';
+        });
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(function () { toast.hidden = true; }, 2400);
+        toastTimer = setTimeout(function () {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(-50%) translateY(10px)';
+        }, 2400);
     }
     async function togglePip() {
         const video = currentVideo();

@@ -135,6 +135,22 @@ header p {{ color: var(--muted); margin: 0; font-size: 14px; }}
 .restart-note {{ color: var(--muted); font-size: 13px; line-height: 1.6; margin: 16px 0 0; }}
 .restart-note.pending {{ color: #f4d488; }}
 .toast {{ max-width: calc(100vw - 32px); width: max-content; text-align: center; border-radius: 16px; z-index: 10; }}
+/* Entrance: sections rise in one after another. */
+@keyframes rise {{ from {{ opacity: 0; transform: translateY(10px); }} to {{ opacity: 1; transform: none; }} }}
+.section, .actions, .restart-note {{ animation: rise .45s var(--ease) both; }}
+.section:nth-of-type(2) {{ animation-delay: .06s; }}
+.section:nth-of-type(3) {{ animation-delay: .12s; }}
+.actions, .restart-note {{ animation-delay: .18s; }}
+.caps {{ background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 6px 18px; }}
+.cap {{ display: flex; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }}
+.cap:last-child {{ border-bottom: 0; }}
+.cap-text {{ flex: 1; min-width: 0; }}
+.cap-title {{ font-size: 14px; font-weight: 500; }}
+.cap-desc {{ font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; overflow-wrap: anywhere; }}
+.pill {{ font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; white-space: nowrap;
+  background: rgba(255,255,255,0.08); color: var(--muted); border: 1px solid var(--border); }}
+.pill.yes {{ background: rgba(120,220,160,0.14); color: #b9f0cf; border-color: rgba(120,220,160,0.3); }}
+.pill.no {{ background: rgba(255,255,255,0.05); color: #a9a9a9; }}
 @media (max-width: 480px) {{
   .wrap {{ padding-inline: 16px; }}
   .row {{ padding: 14px; gap: 12px; }}
@@ -275,6 +291,7 @@ function render() {{
 
   section('Действует сразу', live);
   section('Применится после перезапуска', restart);
+  content.appendChild(capabilities());
 
   var actions = document.createElement('div');
   actions.className = 'actions';
@@ -297,6 +314,61 @@ function render() {{
   note.textContent = 'Изменения сохраняются автоматически. Перезапуск пока не требуется.';
   restartBtn.setAttribute('aria-describedby', note.id);
   content.appendChild(note);
+}}
+
+// What this PC can decode and output, straight from the WebView2 engine.
+// YouTube picks its streams from the same answers.
+function capabilities() {{
+  function supported(type) {{
+    try {{ return !!(window.MediaSource && MediaSource.isTypeSupported(type)); }} catch (e) {{ return false; }}
+  }}
+  var hdrScreen = matchMedia('(dynamic-range: high)').matches;
+  var hdrDecode = supported('video/webm; codecs="vp09.02.51.10.01.09.16.09.00"') ||
+    supported('video/mp4; codecs="av01.0.09M.10.0.110.09.16.09.0"');
+  var dolbyVision = ['dvh1.05.06', 'dvh1.08.06', 'dvhe.05.06', 'dav1.10.06'].some(function (c) {{
+    return supported('video/mp4; codecs="' + c + '"');
+  }});
+  var ddp = supported('audio/mp4; codecs="ec-3"');
+  var ac4 = supported('audio/mp4; codecs="ac-4.02.01.01"');
+  var channels = 0;
+  try {{
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    channels = ctx.destination.maxChannelCount || 0;
+    if (ctx.close) ctx.close();
+  }} catch (e) {{}}
+  var layout = channels >= 8 ? '7.1' : channels >= 6 ? '5.1' : channels >= 2 ? 'Стерео' : 'Неизвестно';
+  var rows = [
+    ['HDR-экран', hdrScreen, hdrScreen ? 'Включён' : 'Выключен',
+      hdrScreen ? 'Ролики с HDR идут в HDR10 или HLG; в плеере появляется значок формата.'
+        : 'Включите «Использовать HDR» в Параметры → Система → Дисплей, чтобы YouTube присылал HDR-версии роликов.'],
+    ['HDR-видео (VP9.2 / AV1 10 бит)', hdrDecode, hdrDecode ? 'Поддерживается' : 'Нет', 'Декодеры 10-битного видео, в которых YouTube отдаёт HDR.'],
+    ['Dolby Vision', dolbyVision, dolbyVision ? 'Декодер есть' : 'Нет декодера',
+      'YouTube не передаёт Dolby Vision: ролики, снятые в нём, он показывает в HDR10/HLG. Значок появится, если поток когда-нибудь придёт.'],
+    ['Dolby Digital Plus / AC-4', ddp || ac4, ddp && ac4 ? 'Оба' : ddp ? 'Dolby Digital Plus' : ac4 ? 'AC-4' : 'Нет',
+      'Кодеки, в которых передаётся Dolby Atmos. Браузерная версия YouTube сейчас отдаёт стерео.'],
+    ['Выход звука', channels > 2, layout + (channels ? ' (' + channels + ' кан.)' : ''),
+      'Многоканальный звук и эквалайзер больше не сводятся в стерео. Dolby Atmos для наушников или домашнего кинотеатра включается в Windows: Параметры → Звук → Пространственный звук. Для обычных наушников есть пресет «Пространство» в эквалайзере плеера.']
+  ];
+  var sec = document.createElement('section');
+  sec.className = 'section';
+  var st = document.createElement('h2');
+  st.className = 'section-title';
+  st.textContent = 'Изображение и звук';
+  sec.appendChild(st);
+  var box = document.createElement('div');
+  box.className = 'caps';
+  rows.forEach(function (r) {{
+    var row = document.createElement('div'); row.className = 'cap';
+    var text = document.createElement('div'); text.className = 'cap-text';
+    var t = document.createElement('div'); t.className = 'cap-title'; t.textContent = r[0];
+    var d = document.createElement('div'); d.className = 'cap-desc'; d.textContent = r[3];
+    text.appendChild(t); text.appendChild(d);
+    var pill = document.createElement('span'); pill.className = 'pill ' + (r[1] ? 'yes' : 'no'); pill.textContent = r[2];
+    row.appendChild(text); row.appendChild(pill);
+    box.appendChild(row);
+  }});
+  sec.appendChild(box);
+  return sec;
 }}
 
 function onToggle(key, on) {{

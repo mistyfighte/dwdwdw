@@ -195,6 +195,8 @@ fn main() -> wry::Result<()> {
         false,
     ));
     parts.push(youtube_only(include_str!("player_extras.js"), false));
+    // HDR / Dolby Vision / surround format badges (reads what YouTube plays).
+    parts.push(youtube_only(include_str!("media_info.js"), false));
     parts.push(frame_pages_only(&format!(
         "window.__YG_CUSTOM_FRAME = {};\n{}",
         !settings.native_titlebar,

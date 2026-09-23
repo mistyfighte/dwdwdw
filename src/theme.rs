@@ -301,15 +301,9 @@ ytd-watch-flexy:not([fullscreen]) #full-bleed-container {
     display: none !important;
 }
 
-/* Ambient light (ambient.js): letterbox bars encoded in the video are cut
-   away so the continuation fills them (insets set by the script, windowed
-   only), and text next to the player gets a soft shadow so it stays
-   readable over bright continuations. */
-html.lg-bars ytd-watch-flexy:not([fullscreen]) #movie_player:not(.ytp-fullscreen) video.video-stream {
-    clip-path: inset(var(--lg-bar-t, 0px) var(--lg-bar-r, 0px) var(--lg-bar-b, 0px) var(--lg-bar-l, 0px));
-}
-html.lg-ambient-on ytd-watch-flexy:not([fullscreen]) :is(#secondary, #below) {
-    text-shadow: 0 1px 2px rgba(0,0,0,0.55), 0 0 12px rgba(0,0,0,0.35);
+/* Ambilight glow ring (see ambient.rs). */
+#lg-ambilight {
+    mix-blend-mode: screen;
 }
 
 #player-container-inner, #player-container, #player, #player-wrap,
@@ -361,7 +355,34 @@ ytd-player#ytd-player #movie_player.ytp-fullscreen {
     box-shadow: none !important;
 }
 
+/* ---------- motion polish ---------- */
+@keyframes lg-page-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+}
+/* Page containers are created once per page type, so this plays on the
+   first visit to home / watch / search, not on every navigation. */
+ytd-page-manager > :is(ytd-browse, ytd-watch-flexy, ytd-search) {
+    animation: lg-page-in .38s var(--lg-ease) both;
+}
+:is(ytd-rich-item-renderer, ytd-compact-video-renderer, ytd-video-renderer) ytd-thumbnail {
+    transition: transform .28s var(--lg-ease), box-shadow .28s var(--lg-ease) !important;
+}
+:is(ytd-rich-item-renderer, ytd-compact-video-renderer, ytd-video-renderer):hover ytd-thumbnail {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+}
+yt-chip-cloud-chip-renderer, ytd-guide-entry-renderer, ytd-searchbox#search,
+ytd-watch-metadata, ytd-comments#comments, #masthead-container {
+    transition: background-color .22s var(--lg-ease), box-shadow .22s var(--lg-ease), outline-color .22s var(--lg-ease) !important;
+}
+yt-chip-cloud-chip-renderer:not([selected]):hover {
+    background: rgba(255,255,255,0.14) !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
+    ytd-page-manager > * { animation: none !important; }
+    :is(ytd-rich-item-renderer, ytd-compact-video-renderer, ytd-video-renderer):hover ytd-thumbnail { transform: none; }
     :is(ytd-app, yt-app) :is(ytd-thumbnail, yt-chip-cloud-chip-renderer, ytd-guide-entry-renderer, button, a) {
         transition: none !important;
         animation: none !important;

@@ -1,57 +1,44 @@
 (function () {
     'use strict';
     if (window.__lgAmbilight) return;
-    const stats = window.__lgAmbilight = { renderer: '', frames: 0 };
-    // Ambient light as a continuation of the picture: the space around the
-    // player shows the video carried on past its edges, out of focus, like a
-    // wider shot of the same scene - not a colour wash.
-    //
-    // WebGL2 renderer, run on every video frame (the video's own 24-60 fps,
-    // no smoothing, so it changes exactly when the picture does):
-    //   1. the visible picture (black bars cropped) is uploaded and scaled
-    //      into a small texture whose mipmaps are rebuilt each frame;
-    //   2. each pixel around the player samples the picture mirrored across
-    //      the nearest edge - the edge continues without a seam - from a mip
-    //      level that grows with the distance from the edge: detail right at
-    //      the edge, only colour and shape further out (depth of field);
-    //   3. brightness and opacity fall off with distance, so the extension
-    //      melts into the page; very bright extensions are capped so text on
-    //      the page stays readable.
-    // Letterbox bars encoded in the video are clipped away (theme CSS,
-    // html.lg-bars) once they are stable and match a standard aspect ratio,
-    // so the extension fills them too.
-    // Without WebGL2, or when frames can't be uploaded, a 2D renderer
-    // extends per-zone edge colours instead (64 zones along the top and
-    // bottom, 36 along the sides).
-    // Analysis grid (bars, brightness): fine enough that a bar edge lands
-    // within ~3 px of the player, where a coarser grid left a thin strip of
-    // the black bar in the picture and mirrored it out as a dark line.
-    const sampleWidth = 192, sampleHeight = 216;
-    const zonesX = 64, zonesY = 36;
-    const depth = 0.1;
-    const ASPECTS = [2.76, 2.39, 2.35, 2.2, 2, 1.85, 16 / 9, 1.66, 1.5, 4 / 3, 1, 0.8, 9 / 16];
+    const stats = window.__lgAmbilight = { frames: 0 };
+    // How it works (the approach of Philips Ambilight and YouTube's own
+    // ambient mode): the light around the player is the video's colour
+    // carried past its edges. On every video frame (up to 60 fps):
+    //   1. the visible picture (black bars cropped) is drawn into `frame`;
+    //   2. each side is reduced to strips of zone colours - `zonesX` points
+    //      along the top/bottom, `zonesY` along the left/right - twice: the
+    //      edge band (`depth`) and a deeper band (`deepDepth`) that gathers
+    //      the colours further inside the picture;
+    //   3. the zone canvas gets the frame in the middle (under the player),
+    //      the deep colours across each margin and the edge colours right
+    //      beside the picture, so every point lights the area next to it;
+    //   4. blur, colour and the outward fade are applied inside a small
+    //      output canvas, so the page composites a plain image (no CSS
+    //      filter or mask to re-run on every frame).
+    // Black-bar detection and brightness run on a small read-back copy
+    // (`raw`) twice a second; the drawing path needs no pixel reads.
+    const sampleWidth = 96, sampleHeight = 54;
+    const zonesX = 96, zonesY = 54;
+    const frameWidth = zonesX * 2, frameHeight = zonesY * 2;
+    const depth = 0.06, deepDepth = 0.24;
+    // Output canvas budget (pixels); the page scales it up.
+    const outputPixels = 120000;
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
-    let root = null, canvas = null, renderer = null, raw = null, rawContext = null;
+    let root, canvas, context, frame, frameContext, raw, rawContext, strips, deepStrips;
+    let zones, zonesContext, mask, maskContext;
     let video = null, callback = null, fallback = null;
     let lastFrame = 0, lastMedia = -1, lastAnalysis = 0, source = '';
-    let readBlocked = false, failed = false, glBroken = false;
-    let bounds = [0, 0, sampleWidth, sampleHeight], crop = bounds.slice();
-    let stableBounds = null, barHits = 0, barsApplied = '';
-    let luminance = 0.35, edgeLuminance = 0.35, gain = 1;
-    let geometryKey = '', layoutFrame = null;
-
+    let readBlocked = false, failed = false, bounds = [0, 0, sampleWidth, sampleHeight];
+    let crop = [0, 0, sampleWidth, sampleHeight];
+    let luminance = 0.35, edgeLuminance = 0.35, geometry = '', layoutFrame = null;
+    let blurPx = 0, gain = 1, appliedFilter = 'none', marginX = 8, marginY = 8;
+    // Spread of the light around the picture (CSS px).
+    function baseMargin(w, h) { return Math.min(320, Math.max(60, Math.min(w, h) * 0.4)); }
     function eligible() {
         return location.pathname === '/watch' && !document.hidden && !document.fullscreenElement;
     }
-    function setOn(on) {
-        const html = document.documentElement;
-        if (html) html.classList.toggle('lg-ambient-on', on);
-    }
-    function hide() {
-        if (root) root.style.opacity = '0';
-        setBars(null);
-        setOn(false);
-    }
+    function hide() { if (root) root.style.opacity = '0'; }
     function cancel() {
         if (callback !== null && video && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(callback);
         callback = null;
@@ -60,269 +47,16 @@
     }
     function reset() {
         lastFrame = 0; lastMedia = -1; lastAnalysis = 0; readBlocked = false; failed = false;
-        luminance = 0.35; edgeLuminance = 0.35; gain = 1;
-        bounds = [0, 0, sampleWidth, sampleHeight]; crop = bounds.slice();
-        stableBounds = null; barHits = 0;
+        luminance = 0.35; edgeLuminance = 0.35; gain = 1; bounds = [0, 0, sampleWidth, sampleHeight]; crop = bounds.slice();
     }
     function makeCanvas(w, h, options) {
         const element = document.createElement('canvas');
         element.width = w; element.height = h;
-        const context = element.getContext('2d', options);
+        const ctx = element.getContext('2d', options);
         // Downscaling into zones must average, not pick single pixels.
-        if (context) { context.imageSmoothingEnabled = true; context.imageSmoothingQuality = 'high'; }
-        return { canvas: element, context: context };
+        if (ctx) { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; }
+        return { canvas: element, context: ctx };
     }
-
-    // ---------- WebGL2 renderer ----------
-    const VERTEX = '#version 300 es\nlayout(location = 0) in vec2 a;\nout vec2 v;\n' +
-        'void main() { v = a * 0.5 + 0.5; gl_Position = vec4(a, 0.0, 1.0); }';
-    // Cropped video -> small picture texture; 4 bilinear taps per texel so
-    // the 3-4x downscale averages instead of aliasing.
-    const DOWNSAMPLE = `#version 300 es
-precision highp float;
-in vec2 v;
-out vec4 o;
-uniform sampler2D src;
-uniform vec4 crop;
-uniform vec2 quarter;
-// Taps stay inside the crop (by half a source texel): the first row of the
-// picture must not average in the black bar next to it.
-vec3 at(vec2 uv, vec2 lo, vec2 hi) { return texture(src, clamp(uv, lo, hi)).rgb; }
-void main() {
-    vec2 half_ = 0.5 / vec2(textureSize(src, 0));
-    vec2 lo = crop.xy + half_, hi = crop.xy + crop.zw - half_;
-    vec2 uv = crop.xy + v * crop.zw;
-    vec3 c = at(uv - quarter, lo, hi) + at(uv + quarter, lo, hi) +
-        at(uv + vec2(quarter.x, -quarter.y), lo, hi) + at(uv + vec2(-quarter.x, quarter.y), lo, hi);
-    o = vec4(c * 0.25, 1.0);
-}`;
-    // Canvas coordinates are CSS px with a top-left origin; `rect` is the
-    // picture inside the canvas, `reach` the extension on each side.
-    const EXTEND = `#version 300 es
-precision highp float;
-in vec2 v;
-out vec4 o;
-uniform sampler2D pic;
-uniform vec2 size;
-uniform vec4 rect;
-uniform vec4 reach;
-uniform vec2 texPerPx;
-uniform float gain;
-vec3 tap(vec2 uv, float lod) { return textureLod(pic, clamp(uv, 0.0, 1.0), lod).rgb; }
-void main() {
-    vec2 p = vec2(v.x, 1.0 - v.y) * size;
-    vec2 q = (p - rect.xy) / rect.zw;
-    vec2 before = rect.xy - p;
-    vec2 after = p - rect.xy - rect.zw;
-    vec2 outside = max(max(before, after), 0.0);
-    // Mirror across the nearest edge (q < 0 -> -q, q > 1 -> 2 - q).
-    vec2 m = clamp(1.0 - abs(1.0 - abs(q)), 0.0, 1.0);
-    float d = length(outside);
-    // Out-of-focus radius grows with distance from the picture.
-    float r = (1.0 + d * 0.3) * max(texPerPx.x, texPerPx.y);
-    float lod = log2(max(r, 1.0));
-    // Trilinear mip plus four diagonal taps: smooth without a blur pass.
-    vec2 s = r * 0.5 / vec2(textureSize(pic, 0));
-    vec3 c = tap(m, lod) * 0.36
-        + (tap(m + s, lod) + tap(m - s, lod) + tap(m + vec2(s.x, -s.y), lod) + tap(m + vec2(-s.x, s.y), lod)) * 0.16;
-    vec2 span = vec2(before.x > 0.0 ? reach.x : reach.z, before.y > 0.0 ? reach.y : reach.w);
-    float f = length(outside / max(span, vec2(1.0)));
-    float alpha = 1.0 - smoothstep(0.3, 1.0, f);
-    c *= gain * mix(1.0, 0.72, smoothstep(0.0, 1.0, f));
-    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    c *= mix(1.0, min(1.0, 0.72 / max(luma, 1e-4)), smoothstep(0.0, 40.0, d));
-    o = vec4(c * alpha, alpha);
-}`;
-    function createGLRenderer() {
-        const element = document.createElement('canvas');
-        let gl = null;
-        try {
-            gl = element.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false,
-                depth: false, stencil: false, powerPreference: 'low-power' });
-        } catch (_) { gl = null; }
-        if (!gl) return null;
-        function compile(type, text) {
-            const shader = gl.createShader(type);
-            gl.shaderSource(shader, text);
-            gl.compileShader(shader);
-            return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null;
-        }
-        function link(fragment) {
-            const vs = compile(gl.VERTEX_SHADER, VERTEX), fs = compile(gl.FRAGMENT_SHADER, fragment);
-            if (!vs || !fs) return null;
-            const program = gl.createProgram();
-            gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program);
-            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
-            const uniforms = {};
-            for (let i = 0, n = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); i < n; i++) {
-                const info = gl.getActiveUniform(program, i);
-                uniforms[info.name] = gl.getUniformLocation(program, info.name);
-            }
-            return { program: program, u: uniforms };
-        }
-        const down = link(DOWNSAMPLE), extend = link(EXTEND);
-        if (!down || !extend) return null;
-        gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-        function texture(minFilter) {
-            const t = gl.createTexture();
-            gl.bindTexture(gl.TEXTURE_2D, t);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            return t;
-        }
-        const frameTexture = texture(gl.LINEAR);
-        const framebuffer = gl.createFramebuffer();
-        let picture = null, pictureWidth = 0, pictureHeight = 0, hasFrame = false, params = null, lost = false;
-        element.addEventListener('webglcontextlost', function (event) {
-            event.preventDefault();
-            lost = true;
-            glBroken = true;
-            if (renderer && renderer.canvas === element) { renderer = null; geometryKey = ''; }
-        });
-        return {
-            canvas: element,
-            kind: 'webgl2',
-            resize: function (g) {
-                // The extension is soft; ~250k pixels are plenty and keep the
-                // per-frame cost low on weak GPUs.
-                const scale = Math.min(0.5, Math.sqrt(250000 / (g.width * g.height)));
-                const w = Math.max(16, Math.round(g.width * scale)), h = Math.max(16, Math.round(g.height * scale));
-                if (element.width !== w) element.width = w;
-                if (element.height !== h) element.height = h;
-                const pw = 384, ph = Math.max(32, Math.min(384, Math.round(384 * g.rect.height / g.rect.width)));
-                if (pw !== pictureWidth || ph !== pictureHeight) {
-                    if (picture) gl.deleteTexture(picture);
-                    picture = texture(gl.LINEAR_MIPMAP_LINEAR);
-                    gl.texStorage2D(gl.TEXTURE_2D, Math.floor(Math.log2(Math.max(pw, ph))) + 1, gl.RGBA8, pw, ph);
-                    pictureWidth = pw; pictureHeight = ph; hasFrame = false;
-                }
-                params = g;
-            },
-            // Throws (SecurityError) for frames WebGL may not read.
-            frame: function (source, box) {
-                if (lost) throw new Error('WebGL context lost');
-                gl.activeTexture(gl.TEXTURE0);
-                gl.bindTexture(gl.TEXTURE_2D, frameTexture);
-                gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-                gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, picture, 0);
-                gl.viewport(0, 0, pictureWidth, pictureHeight);
-                gl.useProgram(down.program);
-                const cw = box[2] / sampleWidth, ch = box[3] / sampleHeight;
-                gl.uniform1i(down.u.src, 0);
-                gl.uniform4f(down.u.crop, box[0] / sampleWidth, box[1] / sampleHeight, cw, ch);
-                gl.uniform2f(down.u.quarter, cw / pictureWidth * 0.25, ch / pictureHeight * 0.25);
-                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-                gl.bindTexture(gl.TEXTURE_2D, picture);
-                gl.generateMipmap(gl.TEXTURE_2D);
-                hasFrame = true;
-            },
-            draw: function () {
-                if (lost || !hasFrame || !params) return;
-                const g = params;
-                gl.viewport(0, 0, element.width, element.height);
-                gl.useProgram(extend.program);
-                gl.activeTexture(gl.TEXTURE0);
-                gl.bindTexture(gl.TEXTURE_2D, picture);
-                gl.uniform1i(extend.u.pic, 0);
-                gl.uniform2f(extend.u.size, g.width, g.height);
-                gl.uniform4f(extend.u.rect, g.reach[0], g.reach[1], g.rect.width, g.rect.height);
-                gl.uniform4f(extend.u.reach, g.reach[0], g.reach[1], g.reach[2], g.reach[3]);
-                gl.uniform2f(extend.u.texPerPx, pictureWidth / g.rect.width, pictureHeight / g.rect.height);
-                gl.uniform1f(extend.u.gain, Math.min(1.25, Math.max(1, gain)));
-                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-            }
-        };
-    }
-
-    // ---------- 2D fallback renderer ----------
-    function fade(dir, near, far) {
-        const stops = [[0, 0], [0.2, 0.14], [0.42, 0.5], [0.66, 0.86], [0.85, 0.98], [1, 1]];
-        const start = stops.map(function (s) { return 'rgba(0,0,0,' + s[1] + ') ' + (near * s[0]).toFixed(1) + 'px'; });
-        const end = stops.slice().reverse().map(function (s) { return 'rgba(0,0,0,' + s[1] + ') calc(100% - ' + (far * s[0]).toFixed(1) + 'px)'; });
-        return 'linear-gradient(to ' + dir + ',transparent 0,' + start.slice(1).join(',') + ',' + end.slice(0, -1).join(',') + ',transparent 100%)';
-    }
-    function create2DRenderer() {
-        const glow = makeCanvas(zonesX + 16, zonesY + 16);
-        const pw = zonesX * 2, ph = zonesY * 2;
-        const picture = makeCanvas(pw, ph);
-        const strips = {
-            left: makeCanvas(1, zonesY), right: makeCanvas(1, zonesY),
-            top: makeCanvas(zonesX, 1), bottom: makeCanvas(zonesX, 1)
-        };
-        const context = glow.context, element = glow.canvas;
-        if (!context || !picture.context || !strips.left.context || !strips.right.context ||
-            !strips.top.context || !strips.bottom.context) return null;
-        let margins = [8, 8, 8, 8], blurPx = 8, applied = '', hasFrame = false;
-        function applyFilter() {
-            // Gentle saturation plus auto-gain (black stays black -
-            // brightness() only scales); quantized in analyze().
-            const value = 'blur(' + blurPx.toFixed(1) + 'px) saturate(1.2) brightness(' + gain.toFixed(2) + ')';
-            if (value !== applied) { applied = value; element.style.filter = value; }
-        }
-        return {
-            canvas: element,
-            kind: '2d',
-            resize: function (g) {
-                // One pixel per zone along the edges, margins in the same
-                // scale, so zone i lights exactly the area beside point i.
-                margins = [
-                    Math.max(2, Math.round(zonesX * g.reach[0] / g.rect.width)),
-                    Math.max(2, Math.round(zonesY * g.reach[1] / g.rect.height)),
-                    Math.max(2, Math.round(zonesX * g.reach[2] / g.rect.width)),
-                    Math.max(2, Math.round(zonesY * g.reach[3] / g.rect.height))];
-                element.width = zonesX + margins[0] + margins[2];
-                element.height = zonesY + margins[1] + margins[3];
-                element.style.maskImage = fade('right', g.reach[0], g.reach[2]) + ',' + fade('bottom', g.reach[1], g.reach[3]);
-                element.style.maskComposite = 'intersect';
-                blurPx = Math.min(34, Math.max(8, Math.min(g.reach[0], g.reach[1], g.reach[2], g.reach[3]) * 0.15));
-            },
-            frame: function (src, box) {
-                const vw = src.videoWidth, vh = src.videoHeight;
-                picture.context.globalAlpha = 1;
-                picture.context.drawImage(src, box[0] / sampleWidth * vw, box[1] / sampleHeight * vh,
-                    box[2] / sampleWidth * vw, box[3] / sampleHeight * vh, 0, 0, pw, ph);
-                hasFrame = true;
-            },
-            draw: function () {
-                if (!hasFrame) return;
-                applyFilter();
-                const bandX = Math.max(2, Math.round(pw * depth)), bandY = Math.max(2, Math.round(ph * depth));
-                strips.left.context.drawImage(picture.canvas, 0, 0, bandX, ph, 0, 0, 1, zonesY);
-                strips.right.context.drawImage(picture.canvas, pw - bandX, 0, bandX, ph, 0, 0, 1, zonesY);
-                strips.top.context.drawImage(picture.canvas, 0, 0, pw, bandY, 0, 0, zonesX, 1);
-                strips.bottom.context.drawImage(picture.canvas, 0, ph - bandY, pw, bandY, 0, 0, zonesX, 1);
-                const l = margins[0], t = margins[1], r = margins[2], b = margins[3];
-                const right = l + zonesX, bottom = t + zonesY;
-                context.globalAlpha = 1;
-                context.clearRect(0, 0, element.width, element.height);
-                context.drawImage(picture.canvas, 0, 0, pw, ph, l, t, zonesX, zonesY);
-                context.drawImage(strips.left.canvas, 0, 0, 1, zonesY, 0, t, l, zonesY);
-                context.drawImage(strips.right.canvas, 0, 0, 1, zonesY, right, t, r, zonesY);
-                context.drawImage(strips.top.canvas, 0, 0, zonesX, 1, l, 0, zonesX, t);
-                context.drawImage(strips.bottom.canvas, 0, 0, zonesX, 1, l, bottom, zonesX, b);
-                // Corners: the two neighbouring end zones mixed half and half.
-                [[strips.left, 0, strips.top, 0, 0, 0, l, t], [strips.right, 0, strips.top, zonesX - 1, right, 0, r, t],
-                    [strips.left, zonesY - 1, strips.bottom, 0, 0, bottom, l, b],
-                    [strips.right, zonesY - 1, strips.bottom, zonesX - 1, right, bottom, r, b]
-                ].forEach(function (c) {
-                    context.globalAlpha = 1;
-                    context.drawImage(c[0].canvas, 0, c[1], 1, 1, c[4], c[5], c[6], c[7]);
-                    context.globalAlpha = 0.5;
-                    context.drawImage(c[2].canvas, c[3], 0, 1, 1, c[4], c[5], c[6], c[7]);
-                });
-                context.globalAlpha = 1;
-            }
-        };
-    }
-
     function ensureDom() {
         if (!document.body) return false;
         if (!root) {
@@ -332,23 +66,33 @@ void main() {
             // Painted BEHIND the page (z-index:-1 in the root stacking
             // context) in document coordinates, so it scrolls natively and
             // never covers text; overflow-x:clip keeps it from widening the page.
-            root.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:0;overflow-x:clip;pointer-events:none;z-index:-1;opacity:0;transition:opacity .45s ease;';
+            root.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:0;overflow-x:clip;pointer-events:none;z-index:-1;opacity:0;transition:opacity .65s ease;mix-blend-mode:screen;';
+            const output = makeCanvas(64, 36);
+            canvas = output.canvas; context = output.context;
+            canvas.style.cssText = 'position:absolute;pointer-events:none;';
+            const zoneCanvas = makeCanvas(zonesX + 16, zonesY + 16);
+            zones = zoneCanvas.canvas; zonesContext = zoneCanvas.context;
+            const fadeMask = makeCanvas(64, 36);
+            mask = fadeMask.canvas; maskContext = fadeMask.context;
+            const picture = makeCanvas(frameWidth, frameHeight);
+            frame = picture.canvas; frameContext = picture.context;
             const analysis = makeCanvas(sampleWidth, sampleHeight, { willReadFrequently: true });
             raw = analysis.canvas; rawContext = analysis.context;
-        }
-        if (!renderer) {
-            if (canvas) canvas.remove();
-            renderer = (!glBroken && createGLRenderer()) || create2DRenderer();
-            if (!renderer) return false;
-            canvas = renderer.canvas;
-            canvas.style.position = 'absolute';
-            canvas.style.pointerEvents = 'none';
+            const stripSet = function () {
+                return {
+                    left: makeCanvas(1, zonesY), right: makeCanvas(1, zonesY),
+                    top: makeCanvas(zonesX, 1), bottom: makeCanvas(zonesX, 1)
+                };
+            };
+            strips = stripSet();
+            deepStrips = stripSet();
             root.appendChild(canvas);
-            stats.renderer = renderer.kind;
-            geometryKey = '';
         }
         if (!root.isConnected) document.body.appendChild(root);
-        return !!rawContext;
+        return !!(context && zonesContext && maskContext && frameContext && rawContext &&
+            [strips, deepStrips].every(function (set) {
+                return set.left.context && set.right.context && set.top.context && set.bottom.context;
+            }));
     }
     function predictedBounds(rect) {
         if (!video || !(video.videoWidth > 0) || !(video.videoHeight > 0) || !(rect.width > 0) || !(rect.height > 0)) return null;
@@ -382,37 +126,8 @@ void main() {
             height: box[3] / sampleHeight * rect.height
         };
     }
-    // Encoded letterbox/pillarbox bars to clip off the video element, in px
-    // of its box: only once stable (three analyses) and when the remaining
-    // picture has a standard aspect ratio - a dark scene must never be cut.
-    function barsFor(element) {
-        if (barHits < 2) return null;
-        const bx = bounds[0], by = bounds[1], bw = bounds[2], bh = bounds[3];
-        if (bx < 1 && by < 1) return null;
-        const t = by / sampleHeight * element.height, b = (sampleHeight - by - bh) / sampleHeight * element.height;
-        const l = bx / sampleWidth * element.width, r = (sampleWidth - bx - bw) / sampleWidth * element.width;
-        const aspect = (element.width - l - r) / Math.max(1, element.height - t - b);
-        if (!ASPECTS.some(function (a) { return Math.abs(aspect - a) / a < 0.03; })) return null;
-        return [t, r, b, l];
-    }
-    function setBars(insets) {
-        const html = document.documentElement;
-        if (!html) return;
-        const key = insets ? insets.map(function (n) { return n.toFixed(1); }).join(' ') : '';
-        if (key === barsApplied) return;
-        barsApplied = key;
-        html.classList.toggle('lg-bars', !!insets);
-        // Whole pixels, rounded up: an anti-aliased clip edge let a hairline
-        // of the bar show through.
-        if (insets) ['t', 'r', 'b', 'l'].forEach(function (side, i) {
-            html.style.setProperty('--lg-bar-' + side, Math.ceil(insets[i] - 0.05) + 'px');
-        });
-    }
-    function repaint() {
-        try { renderer.frame(video, crop); renderer.draw(); } catch (_) { /* the next paint() handles it */ }
-    }
     function layout() {
-        if (!video || !root || !renderer) return false;
+        if (!video || !root) return false;
         const element = video.getBoundingClientRect();
         if (element.width < 160 || element.height < 90 || element.bottom <= 0 || element.top >= innerHeight || element.right <= 0 || element.left >= innerWidth) return false;
         const player = document.querySelector('#movie_player');
@@ -420,31 +135,81 @@ void main() {
         crop = effectiveBounds(element);
         const rect = contentRect(element, crop);
         if (rect.width < 24 || rect.height < 24) return false;
-        // Sideways the extension reaches the window edges (the world goes on
-        // off-screen); vertically about half a picture.
-        const base = Math.min(360, Math.max(80, Math.min(rect.width, rect.height) * 0.5));
-        const vertical = Math.min(420, Math.max(80, rect.height * 0.55));
-        const reach = [
-            Math.min(1000, Math.max(base, rect.left)), vertical,
-            Math.min(1000, Math.max(base, innerWidth - rect.left - rect.width)), vertical];
+        const margin = baseMargin(rect.width, rect.height);
+        // Sideways the light reaches the window edges when the player has
+        // free space on both sides (theater mode), instead of stopping short
+        // and leaving dark strips at the edges.
+        const sideGap = Math.min(rect.left, innerWidth - (rect.left + rect.width));
+        const mX = Math.min(480, Math.max(margin, sideGap)), mY = margin;
+        const canvasWidth = rect.width + mX * 2, canvasHeight = rect.height + mY * 2;
         const pageLeft = rect.left + (window.scrollX || 0), pageTop = rect.top + (window.scrollY || 0);
-        const key = [pageLeft, pageTop, rect.width, rect.height].concat(reach)
-            .map(function (n) { return n.toFixed(1); }).join(':') + renderer.kind;
-        if (key !== geometryKey) {
-            geometryKey = key;
-            const g = { rect: { width: rect.width, height: rect.height }, reach: reach,
-                width: rect.width + reach[0] + reach[2], height: rect.height + reach[1] + reach[3] };
-            Object.assign(canvas.style, {
-                left: (pageLeft - reach[0]) + 'px', top: (pageTop - reach[1]) + 'px',
-                width: g.width + 'px', height: g.height + 'px'
-            });
-            renderer.resize(g);
-            // Resizing clears the canvas; repaint from the current frame at
+        // The hole only has to hide blur bleeding under the opaque frame, so
+        // it sits inside the content rect (by the player's corner radius):
+        // an outward hole left a dark seam and dark rounded corners.
+        const radius = player ? parseFloat(getComputedStyle(player).borderTopLeftRadius) || 0 : 0;
+        const inset = Math.min(Math.min(rect.width, rect.height) / 4, radius + 2);
+        const key = [pageLeft, pageTop, rect.width, rect.height, inset, mX].join(':');
+        if (key !== geometry) {
+            geometry = key;
+            // Zone canvas: one pixel per zone along the edges, margins in the
+            // same scale, so zone i lights exactly the area beside point i.
+            marginX = Math.max(2, Math.round(zonesX * mX / rect.width));
+            marginY = Math.max(2, Math.round(zonesY * mY / rect.height));
+            zones.width = zonesX + marginX * 2;
+            zones.height = zonesY + marginY * 2;
+            // Output canvas: a fraction of the CSS size (the light is soft,
+            // upscaling costs nothing), with the fade baked into `mask`.
+            const scale = Math.min(0.25, Math.sqrt(outputPixels / (canvasWidth * canvasHeight)));
+            canvas.width = Math.max(16, Math.round(canvasWidth * scale));
+            canvas.height = Math.max(16, Math.round(canvasHeight * scale));
+            buildMask(canvas.width, canvas.height, mX * canvas.width / canvasWidth, mY * canvas.height / canvasHeight);
+            // Enough to melt neighbouring zones together, not so much that
+            // every side turns into one average colour.
+            blurPx = Math.min(34, Math.max(8, Math.min(mX, mY) * 0.15)) * canvas.width / canvasWidth;
+            applyFilter();
+            // Resizing clears the canvases; repaint from the last frame at
             // once, or a paused video (no new frames) would lose its light.
-            if (lastFrame) repaint();
+            if (lastFrame) drawGlow();
+            const leftHole = mX + inset, rightHole = mX + rect.width - inset;
+            const topHole = mY + inset, bottomHole = mY + rect.height - inset;
+            // Outer ring well beyond the box: clipping at 0%/100% cut the
+            // blur off in a hard line at the canvas edge.
+            canvas.style.clipPath = 'polygon(evenodd,-50% -50%,150% -50%,150% 150%,-50% 150%,-50% -50%,' + leftHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + topHole + 'px)';
+            Object.assign(canvas.style, {
+                left: (pageLeft - mX) + 'px', top: (pageTop - mY) + 'px',
+                width: canvasWidth + 'px', height: canvasHeight + 'px'
+            });
         }
-        setBars(barsFor(element));
         return true;
+    }
+    // The light keeps full strength next to the player and fades out over
+    // the outer part of the spread. Linear fades only (a radial mask darkened
+    // the corners); intersected, so the corners fade diagonally.
+    const fadeStops = [[0, 0], [0.2, 0.14], [0.42, 0.5], [0.66, 0.86], [0.85, 0.98], [1, 1]];
+    function buildMask(w, h, mx, my) {
+        mask.width = w; mask.height = h;
+        const m = maskContext;
+        function gradient(horizontal, span, total) {
+            const g = horizontal ? m.createLinearGradient(0, 0, total, 0) : m.createLinearGradient(0, 0, 0, total);
+            const edge = Math.min(0.5, span / total);
+            fadeStops.forEach(function (s) { g.addColorStop(s[0] * edge, 'rgba(0,0,0,' + s[1] + ')'); });
+            fadeStops.slice().reverse().forEach(function (s) { g.addColorStop(1 - s[0] * edge, 'rgba(0,0,0,' + s[1] + ')'); });
+            return g;
+        }
+        m.globalCompositeOperation = 'source-over';
+        m.clearRect(0, 0, w, h);
+        m.fillStyle = gradient(true, mx, w);
+        m.fillRect(0, 0, w, h);
+        m.globalCompositeOperation = 'destination-in';
+        m.fillStyle = gradient(false, my, h);
+        m.fillRect(0, 0, w, h);
+        m.globalCompositeOperation = 'source-over';
+    }
+    // Blur plus gentle saturation and auto-gain towards a target level
+    // (black stays black - brightness() only scales), applied while drawing
+    // into the output canvas.
+    function applyFilter() {
+        appliedFilter = 'blur(' + blurPx.toFixed(2) + 'px) saturate(1.25) brightness(' + gain.toFixed(2) + ')';
     }
     function analyze(now) {
         if (readBlocked || now - lastAnalysis < 500) return;
@@ -471,19 +236,14 @@ void main() {
         while (bottom > sampleHeight - 1 - maxTop && !bright(true, bottom)) bottom--;
         while (left < maxLeft && !bright(false, left)) left++;
         while (right > sampleWidth - 1 - maxLeft && !bright(false, right)) right--;
-        const verticalBars = top > 1 && top < maxTop && Math.abs(top - (sampleHeight - 1 - bottom)) <= 3;
-        const horizontalBars = left > 1 && left < maxLeft && Math.abs(left - (sampleWidth - 1 - right)) <= 3;
-        // One extra row/column inwards: the soft, dark first line of the
-        // picture after a bar must not become the edge the light continues.
-        bounds = [horizontalBars ? left + 1 : 0, verticalBars ? top + 1 : 0,
-            horizontalBars ? right - left - 1 : sampleWidth, verticalBars ? bottom - top - 1 : sampleHeight];
-        const steady = stableBounds && bounds.every(function (n, i) { return Math.abs(n - stableBounds[i]) <= 2; });
-        barHits = steady ? barHits + 1 : 0;
-        stableBounds = bounds.slice();
+        const verticalBars = top > 0 && top < maxTop && Math.abs(top - (sampleHeight - 1 - bottom)) <= 2;
+        const horizontalBars = left > 0 && left < maxLeft && Math.abs(left - (sampleWidth - 1 - right)) <= 2;
+        bounds = [horizontalBars ? left : 0, verticalBars ? top : 0,
+            horizontalBars ? right - left + 1 : sampleWidth, verticalBars ? bottom - top + 1 : sampleHeight];
         let total = 0;
         for (let offset = 0; offset < pixels.length; offset += 4) total += pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722;
         luminance += (total / (sampleWidth * sampleHeight * 255) - luminance) * 0.25;
-        // Brightness of the frame's border band drives the auto-gain.
+        // Brightness of the same edge bands the zones are built from.
         const bx = bounds[0], by = bounds[1], bw = bounds[2], bh = bounds[3];
         const dx = Math.max(1, bw * depth), dy = Math.max(1, bh * depth);
         let edgeTotal = 0, edgeCount = 0;
@@ -496,8 +256,12 @@ void main() {
             }
         }
         if (edgeCount) edgeLuminance += (edgeTotal / (edgeCount * 255) - edgeLuminance) * 0.3;
+        // Close to 1 so the light keeps the edge's own colour: dim edges are
+        // lifted a little, white ones toned down slightly (text next to the
+        // player stays readable on its dark cards).
         const target = Math.min(1.5, Math.max(0.85, 0.36 / Math.max(0.04, edgeLuminance)));
         gain = Math.round(target * 20) / 20;
+        applyFilter();
     }
     function schedule() {
         if (!eligible() || !video || video.paused || video.ended || failed || callback !== null || fallback !== null) return;
@@ -507,28 +271,55 @@ void main() {
             fallback = setTimeout(function () { fallback = null; render(false); }, motion.matches ? 125 : 16);
         }
     }
-    function paint(now) {
-        try {
-            analyze(now);
-            renderer.frame(video, crop);
-            renderer.draw();
-        } catch (_) {
-            if (renderer && renderer.kind === 'webgl2') {
-                // Frames WebGL can't read (e.g. tainted) still render in 2D.
-                glBroken = true;
-                renderer = null;
-                if (!ensureDom() || !layout()) return false;
-                return paint(now);
-            }
-            failed = true;
-            hide();
-            return false;
-        }
-        lastFrame = now; lastMedia = video.currentTime;
-        stats.frames++;
-        root.style.opacity = video.paused || video.ended ? '0.9' : '1';
-        setOn(true);
-        return true;
+    function glowOpacity() {
+        return String(Math.min(1, 0.86 + Math.sqrt(Math.max(0, luminance)) * 0.14) * (video.paused || video.ended ? 0.85 : 1));
+    }
+    function reduce(set, bandX, bandY) {
+        set.left.context.drawImage(frame, 0, 0, bandX, frameHeight, 0, 0, 1, zonesY);
+        set.right.context.drawImage(frame, frameWidth - bandX, 0, bandX, frameHeight, 0, 0, 1, zonesY);
+        set.top.context.drawImage(frame, 0, 0, frameWidth, bandY, 0, 0, zonesX, 1);
+        set.bottom.context.drawImage(frame, 0, frameHeight - bandY, frameWidth, bandY, 0, 0, zonesX, 1);
+    }
+    // Strips out from the four sides of the picture, `ix`/`iy` deep, plus the
+    // corners (the two neighbouring end zones mixed half and half).
+    function extend(set, ix, iy) {
+        const c = zonesContext, mx = marginX, my = marginY, right = mx + zonesX, bottom = my + zonesY;
+        c.globalAlpha = 1;
+        c.drawImage(set.left.canvas, 0, 0, 1, zonesY, mx - ix, my, ix, zonesY);
+        c.drawImage(set.right.canvas, 0, 0, 1, zonesY, right, my, ix, zonesY);
+        c.drawImage(set.top.canvas, 0, 0, zonesX, 1, mx, my - iy, zonesX, iy);
+        c.drawImage(set.bottom.canvas, 0, 0, zonesX, 1, mx, bottom, zonesX, iy);
+        [[set.left, 0, set.top, 0, mx - ix, my - iy], [set.right, 0, set.top, zonesX - 1, right, my - iy],
+            [set.left, zonesY - 1, set.bottom, 0, mx - ix, bottom], [set.right, zonesY - 1, set.bottom, zonesX - 1, right, bottom]
+        ].forEach(function (corner) {
+            c.globalAlpha = 1;
+            c.drawImage(corner[0].canvas, 0, corner[1], 1, 1, corner[4], corner[5], ix, iy);
+            c.globalAlpha = 0.5;
+            c.drawImage(corner[2].canvas, corner[3], 0, 1, 1, corner[4], corner[5], ix, iy);
+        });
+        c.globalAlpha = 1;
+    }
+    function drawGlow() {
+        // 2. Zone strips: the edge band and the deeper band of each side,
+        //    averaged into one colour per point.
+        reduce(strips, Math.max(2, Math.round(frameWidth * depth)), Math.max(2, Math.round(frameHeight * depth)));
+        reduce(deepStrips, Math.max(2, Math.round(frameWidth * deepDepth)), Math.max(2, Math.round(frameHeight * deepDepth)));
+        // 3. Zones: the picture under the player, the deeper colours across
+        //    the whole spread, the edge colours over its inner half.
+        zonesContext.globalAlpha = 1;
+        zonesContext.clearRect(0, 0, zones.width, zones.height);
+        zonesContext.drawImage(frame, 0, 0, frameWidth, frameHeight, marginX, marginY, zonesX, zonesY);
+        extend(deepStrips, marginX, marginY);
+        extend(strips, Math.max(1, Math.round(marginX * 0.5)), Math.max(1, Math.round(marginY * 0.5)));
+        // 4. Output: blur and colour while scaling up, then the fade.
+        context.globalCompositeOperation = 'source-over';
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.filter = appliedFilter;
+        context.drawImage(zones, 0, 0, zones.width, zones.height, 0, 0, canvas.width, canvas.height);
+        context.filter = 'none';
+        context.globalCompositeOperation = 'destination-in';
+        context.drawImage(mask, 0, 0);
+        context.globalCompositeOperation = 'source-over';
     }
     function render(force) {
         if (!eligible() || !video || video.readyState < 2 || !video.videoWidth || !ensureDom()) { hide(); return; }
@@ -536,9 +327,25 @@ void main() {
         if (failed) { hide(); return; }
         if (!layout()) { hide(); return; }
         const now = performance.now();
-        // Every new video frame is painted; reduced motion caps it at 8 fps.
+        if (lastFrame) root.style.opacity = glowOpacity();
+        // Every new video frame is painted (up to the video's own 60 fps);
+        // reduced motion caps it at 8 fps.
         if (!force && ((motion.matches && now - lastFrame < 125) || video.currentTime === lastMedia)) { schedule(); return; }
-        if (paint(now)) schedule();
+        try {
+            analyze(now);
+            // 1. Visible picture, blended over the previous one: a short,
+            //    time-based settle (~50 ms) that removes flicker but keeps
+            //    up with cuts and flashes.
+            const vw = video.videoWidth, vh = video.videoHeight;
+            frameContext.globalAlpha = lastFrame ? 1 - Math.exp(-Math.max(1, now - lastFrame) / (motion.matches ? 450 : 50)) : 1;
+            frameContext.drawImage(video, crop[0] / sampleWidth * vw, crop[1] / sampleHeight * vh,
+                crop[2] / sampleWidth * vw, crop[3] / sampleHeight * vh, 0, 0, frameWidth, frameHeight);
+            drawGlow();
+            stats.frames++;
+            lastFrame = now; lastMedia = video.currentTime;
+            root.style.opacity = glowOpacity();
+        } catch (_) { failed = true; hide(); return; }
+        schedule();
     }
     function refresh() {
         cancel();
@@ -546,25 +353,15 @@ void main() {
         if (next !== video) { video = next; source = ''; reset(); }
         render(true);
     }
-    function showIfPainted() {
-        if (!lastFrame) return;
-        root.style.opacity = video.paused || video.ended ? '0.9' : '1';
-        setOn(true);
-    }
     function requestLayout() {
         if (layoutFrame !== null) return;
-        layoutFrame = requestAnimationFrame(function () {
-            layoutFrame = null;
-            if (!eligible() || !video || !renderer) return;
-            if (!layout()) hide();
-            else showIfPainted();
-        });
+        layoutFrame = requestAnimationFrame(function () { layoutFrame = null; render(false); });
     }
-    ['yt-navigate-finish', 'DOMContentLoaded', 'fullscreenchange', 'visibilitychange'].forEach(function (name) {
+    ['yt-navigate-finish','DOMContentLoaded','fullscreenchange','visibilitychange'].forEach(function (name) {
         document.addEventListener(name, refresh);
     });
     document.addEventListener('yt-navigate-start', function () { cancel(); hide(); });
-    ['play', 'pause', 'seeked', 'loadeddata', 'emptied', 'ended'].forEach(function (name) {
+    ['play','pause','seeked','loadeddata','emptied','ended'].forEach(function (name) {
         document.addEventListener(name, function (event) { if (event.target.tagName === 'VIDEO') refresh(); }, true);
     });
     window.addEventListener('resize', requestLayout);
@@ -576,10 +373,9 @@ void main() {
         if (!eligible()) { cancel(); hide(); return; }
         const current = document.querySelector('#movie_player video') || document.querySelector('video');
         if (current !== video || (video && (!root || !root.isConnected || source !== video.currentSrc))) refresh();
-        else if (video && renderer) {
+        else if (video) {
             if (!layout()) hide();
             else if (callback === null && fallback === null && !video.paused && !video.ended) render(false);
-            else showIfPainted();
         } else hide();
     }, 1000);
     refresh();

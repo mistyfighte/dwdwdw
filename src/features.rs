@@ -54,14 +54,19 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                        comp: {{ threshold: -28, knee: 20, ratio: 5, attack: 0.003, release: 0.25 }} }},
             night:  {{ gains: [-4, 0, 3, 2, -2],
                        comp: {{ threshold: -38, knee: 12, ratio: 12, attack: 0.002, release: 0.40 }} }},
+            // Headphones: the stereo pair played from two virtual speakers
+            // at +-30 degrees through the browser's HRTF (as Windows Sonic /
+            // Dolby Atmos for Headphones do for stereo), a touch of air on top.
+            spatial: {{ gains: [2, 0, 0, 1, 2], comp: null, spatial: true }},
         }};
-        var PRESET_ORDER = ['flat', 'bass', 'vocal', 'cinema', 'treble', 'voice', 'night'];
+        var PRESET_ORDER = ['flat', 'bass', 'vocal', 'cinema', 'spatial', 'treble', 'voice', 'night'];
         var PRESET_LABEL = {{
             flat: 'Нейтрально', bass: 'Бас', vocal: 'Вокал',
-            cinema: 'Кино', treble: 'Высокие',
+            cinema: 'Кино', spatial: 'Пространство', treble: 'Высокие',
             voice: 'Речь', night: 'Ночной',
         }};
-        var audio = {{ ctx: null, src: null, bands: [], comp: null,
+        var audio = {{ ctx: null, src: null, bands: [], comp: null, compWet: null, compDry: null,
+                       spatialWet: null, spatialDry: null,
                        muteGain: null, master: null, attached: null }};
 
         function savedAudioPreset() {{
@@ -92,19 +97,60 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             }});
             var node = audio.src;
             audio.bands.forEach(function (b) {{ node.connect(b); node = b; }});
+            // All of the source's channels reach the output device: the
+            // destination defaults to 2 and would fold 5.1/7.1 down to stereo
+            // before Windows (speaker setup or spatial sound) ever sees it.
+            try {{
+                var dest = audio.ctx.destination;
+                dest.channelCount = Math.max(2, Math.min(8, dest.maxChannelCount || 2));
+                dest.channelInterpretation = 'speakers';
+            }} catch (e) {{}}
             audio.comp = audio.ctx.createDynamicsCompressor();
             audio.comp.threshold.value = -22;
             audio.comp.knee.value = 28;
             audio.comp.ratio.value = 3.5;
             audio.comp.attack.value = 0.004;
             audio.comp.release.value = 0.30;
+            // Compressor and its bypass are separate paths: the compressor
+            // node is stereo-only, so 'off'/multichannel audio skips it
+            // entirely instead of running it at ratio 1.
+            audio.compWet = audio.ctx.createGain();
+            audio.compDry = audio.ctx.createGain();
+            audio.compWet.gain.value = 0;
             node.connect(audio.comp);
+            node.connect(audio.compDry);
+            audio.comp.connect(audio.compWet);
+            var mixed = audio.ctx.createGain();
+            audio.compWet.connect(mixed);
+            audio.compDry.connect(mixed);
+            // Virtual speakers for headphones (the 'spatial' preset).
+            audio.spatialDry = audio.ctx.createGain();
+            audio.spatialWet = audio.ctx.createGain();
+            audio.spatialWet.gain.value = 0;
+            mixed.connect(audio.spatialDry);
+            var split = audio.ctx.createChannelSplitter(2);
+            mixed.connect(split);
+            [-1, 1].forEach(function (side, index) {{
+                var speaker = audio.ctx.createPanner();
+                speaker.panningModel = 'HRTF';
+                speaker.distanceModel = 'inverse';
+                speaker.refDistance = 1;
+                var x = side * Math.sin(Math.PI / 6), z = -Math.cos(Math.PI / 6);
+                if (speaker.positionX) {{
+                    speaker.positionX.value = x; speaker.positionY.value = 0; speaker.positionZ.value = z;
+                }} else {{
+                    speaker.setPosition(x, 0, z);
+                }}
+                split.connect(speaker, index);
+                speaker.connect(audio.spatialWet);
+            }});
             // muteGain mirrors video.muted; master mirrors video.volume. Once
             // the element is routed through the graph these properties stop
             // affecting output directly, so we reapply them here.
             audio.muteGain = audio.ctx.createGain();
             audio.muteGain.gain.value = v.muted ? 0 : 1;
-            audio.comp.connect(audio.muteGain);
+            audio.spatialDry.connect(audio.muteGain);
+            audio.spatialWet.connect(audio.muteGain);
             audio.master = audio.ctx.createGain();
             audio.master.gain.value = v.volume;
             audio.muteGain.connect(audio.master);
@@ -112,16 +158,46 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             audio.attached = v;
         }}
 
-        // Push a compressor curve into the live node; null flattens it to
-        // transparency (ratio 1 = no gain reduction ever).
+        // Channels of the track YouTube is playing (media_info.js); stereo
+        // when unknown.
+        function sourceChannels() {{
+            var info = window.__ygMediaInfo && window.__ygMediaInfo.current();
+            return info && info.audio && info.audio.channels || 2;
+        }}
+
+        // Short ramps so switching presets never clicks.
+        function setGain(param, value) {{
+            if (!audio.ctx) return;
+            var t = audio.ctx.currentTime;
+            try {{
+                param.cancelScheduledValues(t);
+                param.setValueAtTime(param.value, t);
+                param.linearRampToValueAtTime(value, t + 0.08);
+            }} catch (e) {{ param.value = value; }}
+        }}
+
+        // Compressor curve into the live node, or a true bypass for null and
+        // for surround sources (the compressor is stereo-only).
         function applyComp(settings) {{
             if (!audio.comp) return;
-            var s = settings || {{ threshold: 0, knee: 0, ratio: 1, attack: 0.003, release: 0.25 }};
-            audio.comp.threshold.value = s.threshold;
-            audio.comp.knee.value = s.knee;
-            audio.comp.ratio.value = s.ratio;
-            audio.comp.attack.value = s.attack;
-            audio.comp.release.value = s.release;
+            var use = !!settings && sourceChannels() <= 2;
+            if (use) {{
+                audio.comp.threshold.value = settings.threshold;
+                audio.comp.knee.value = settings.knee;
+                audio.comp.ratio.value = settings.ratio;
+                audio.comp.attack.value = settings.attack;
+                audio.comp.release.value = settings.release;
+            }}
+            setGain(audio.compWet.gain, use ? 1 : 0);
+            setGain(audio.compDry.gain, use ? 0 : 1);
+        }}
+
+        // Virtual speakers only for stereo; surround goes to the device as is.
+        function applySpatial(on) {{
+            if (!audio.spatialWet) return;
+            var use = !!on && sourceChannels() <= 2;
+            setGain(audio.spatialWet.gain, use ? 0.85 : 0);
+            setGain(audio.spatialDry.gain, use ? 0 : 1);
         }}
 
         function applyAudioPreset(name) {{
@@ -131,15 +207,17 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
             if (name === 'off') {{
                 // Can't destroy the graph (one-shot source node) - flatten it
                 // to transparency instead. Audibly neutral.
-                if (audio.bands.length) audio.bands.forEach(function (b) {{ b.gain.value = 0; }});
+                if (audio.bands.length) audio.bands.forEach(function (b) {{ setGain(b.gain, 0); }});
                 applyComp(null);
+                applySpatial(false);
                 return;
             }}
             if (!audio.attached) buildAudioGraph(v);
             if (!audio.attached) return;
             var p = PRESETS[name] || PRESETS.flat;
-            audio.bands.forEach(function (b, i) {{ b.gain.value = p.gains[i] || 0; }});
+            audio.bands.forEach(function (b, i) {{ setGain(b.gain, p.gains[i] || 0); }});
             applyComp(p.comp);
+            applySpatial(p.spatial);
             if (audio.ctx && audio.ctx.state === 'suspended') {{
                 audio.ctx.resume().catch(function () {{}});
             }}
@@ -246,7 +324,12 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 '.lg-cinema-btn svg{{width:24px!important;height:24px!important;' +
                     'padding:0!important;flex-shrink:0;opacity:1;' +
                     'transition:opacity 0.2s ease;}}' +
-                '.lg-cinema-btn[aria-pressed="false"] svg{{opacity:0.4;}}';
+                '.lg-cinema-btn[aria-pressed="false"] svg{{opacity:0.4;}}' +
+                // Our player buttons: a soft press, like YouTube's own.
+                '.lg-cinema-btn svg,.lg-audio-btn svg,.yg-pip-button svg{{transition:transform .18s cubic-bezier(0.22,1,0.36,1),opacity .2s ease;}}' +
+                '.lg-cinema-btn:active svg,.lg-audio-btn:active svg,.yg-pip-button:active svg{{transform:scale(0.86);}}' +
+                '#lg-eq-panel button{{transition:background-color .15s ease;}}' +
+                '@media (prefers-reduced-motion: reduce){{#lg-eq-panel,#lg-eq-panel button,.lg-cinema-btn svg,.lg-audio-btn svg,.yg-pip-button svg{{transition:none!important;}}}}';
             target.appendChild(s);
         }}
         addCinemaStyle();
@@ -803,12 +886,14 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 'background:rgba(18,18,18,0.92);backdrop-filter:blur(14px);' +
                 'border:1px solid rgba(255,255,255,0.10);border-radius:14px;' +
                 'padding:8px;box-shadow:0 12px 40px rgba(0,0,0,0.55);' +
-                'font:500 13px "Roboto","Segoe UI",sans-serif;color:#f5f5f5;';
+                'font:500 13px "Roboto","Segoe UI",sans-serif;color:#f5f5f5;' +
+                'opacity:0;transform:translateY(8px) scale(0.97);transform-origin:100% 100%;' +
+                'transition:opacity .18s cubic-bezier(0.22,1,0.36,1),transform .22s cubic-bezier(0.22,1,0.36,1);';
             var cur = savedAudioPreset();
             var DESC = {{
                 off: 'Без обработки', flat: 'Только компрессор выкл',
                 bass: 'Глубокий низ', vocal: 'Чистый голос',
-                cinema: 'Объём + динамика', treble: 'Яркий верх',
+                cinema: 'Объём + динамика', spatial: 'Колонки в наушниках', treble: 'Яркий верх',
                 voice: 'Речь, подкасты', night: 'Тихо и ровно',
             }};
             ['off'].concat(PRESET_ORDER).forEach(function (name) {{
@@ -857,6 +942,10 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
                 if (anchorBtn && anchorBtn.isConnected) anchorBtn.focus();
             }});
             player.appendChild(panel);
+            requestAnimationFrame(function () {{
+                panel.style.opacity = '1';
+                panel.style.transform = 'none';
+            }});
             if (anchorBtn) anchorBtn.setAttribute('aria-expanded', 'true');
             // Any click outside dismisses. Clicks on the toggle button are
             // left to its own handler: dismissing here first made the button
@@ -874,7 +963,15 @@ pub fn script(block_ads: bool, cinema: bool, prefer_hd: bool) -> String {
         var eqDismiss = null;
         function closeEqPanel() {{
             var panel = document.getElementById('lg-eq-panel');
-            if (panel) panel.remove();
+            if (panel) {{
+                // Fade out, then remove; the id goes first so a quick reopen
+                // builds a fresh panel instead of toggling this one.
+                panel.removeAttribute('id');
+                panel.style.pointerEvents = 'none';
+                panel.style.opacity = '0';
+                panel.style.transform = 'translateY(6px) scale(0.97)';
+                setTimeout(function () {{ panel.remove(); }}, 200);
+            }}
             if (eqDismiss) {{
                 document.removeEventListener('click', eqDismiss, true);
                 eqDismiss = null;
