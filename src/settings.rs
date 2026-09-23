@@ -20,6 +20,9 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Window stays above other windows (set_always_on_top).
     pub always_on_top: bool,
+    /// Use the native Windows title bar instead of the controls integrated
+    /// into YouTube's masthead (window_frame.js). Applies live.
+    pub native_titlebar: bool,
     /// Cinema mode default: when true, dim-around-the-player is on at launch;
     /// the player-bar toggle is always available regardless.
     pub cinema: bool,
@@ -43,6 +46,7 @@ impl Default for Settings {
             block_ads: true,
             close_to_tray: true,
             always_on_top: false,
+            native_titlebar: false,
             cinema: false,
             prefer_hd: false,
             discord_rpc: true,
@@ -71,11 +75,12 @@ impl Settings {
     pub fn to_json(&self) -> String {
         let b = |v: bool| if v { "true" } else { "false" };
         format!(
-            "{{\"theme\":{},\"block_ads\":{},\"close_to_tray\":{},\"always_on_top\":{},\"cinema\":{},\"prefer_hd\":{},\"discord_rpc\":{},\"discord_configured\":{}}}",
+            "{{\"theme\":{},\"block_ads\":{},\"close_to_tray\":{},\"always_on_top\":{},\"native_titlebar\":{},\"cinema\":{},\"prefer_hd\":{},\"discord_rpc\":{},\"discord_configured\":{}}}",
             b(self.theme),
             b(self.block_ads),
             b(self.close_to_tray),
             b(self.always_on_top),
+            b(self.native_titlebar),
             b(self.cinema),
             b(self.prefer_hd),
             b(self.discord_rpc),
@@ -122,6 +127,7 @@ fn load_from(s: &mut Settings, path: &std::path::Path) {
             "block_ads" => s.block_ads = on,
             "close_to_tray" => s.close_to_tray = on,
             "always_on_top" => s.always_on_top = on,
+            "native_titlebar" => s.native_titlebar = on,
             "cinema" => s.cinema = on,
             "prefer_hd" => s.prefer_hd = on,
             "discord_rpc" => s.discord_rpc = on,
@@ -155,11 +161,12 @@ fn save_to(s: &Settings, path: &std::path::Path) -> std::io::Result<()> {
     atomic_write(path, |file| {
         write!(
         file,
-        "theme={}\nblock_ads={}\nclose_to_tray={}\nalways_on_top={}\ncinema={}\nprefer_hd={}\ndiscord_rpc={}\ndiscord_client_id={}\n",
+        "theme={}\nblock_ads={}\nclose_to_tray={}\nalways_on_top={}\nnative_titlebar={}\ncinema={}\nprefer_hd={}\ndiscord_rpc={}\ndiscord_client_id={}\n",
         one(s.theme),
         one(s.block_ads),
         one(s.close_to_tray),
         one(s.always_on_top),
+        one(s.native_titlebar),
         one(s.cinema),
         one(s.prefer_hd),
         one(s.discord_rpc),
@@ -258,6 +265,7 @@ mod tests {
             block_ads: false,
             close_to_tray: false,
             always_on_top: true,
+            native_titlebar: true,
             cinema: false,
             prefer_hd: false,
             discord_rpc: false,
@@ -278,6 +286,7 @@ mod tests {
             block_ads: false,
             close_to_tray: false,
             always_on_top: false,
+            native_titlebar: false,
             cinema: false,
             prefer_hd: false,
             discord_rpc: false,

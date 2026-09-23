@@ -118,9 +118,19 @@
             // Outer ring well beyond the box: clipping at 0%/100% cut the
             // blur off in a hard line at the canvas edge.
             canvas.style.clipPath = 'polygon(evenodd,-50% -50%,150% -50%,150% 150%,-50% 150%,-50% -50%,' + leftHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + topHole + 'px)';
+            // Light fades out with distance from the frame: full strength at
+            // the video edge, zero at the canvas edge. Two linear masks
+            // intersected, so corners next to the video keep full strength.
+            const fade = function (dir) {
+                return 'linear-gradient(to ' + dir + ',transparent 0,rgba(0,0,0,.35) ' + (margin * 0.35).toFixed(1) +
+                    'px,#000 ' + margin.toFixed(1) + 'px,#000 calc(100% - ' + margin.toFixed(1) + 'px),rgba(0,0,0,.35) calc(100% - ' +
+                    (margin * 0.35).toFixed(1) + 'px),transparent 100%)';
+            };
             Object.assign(canvas.style, {
                 left: (pageLeft - margin) + 'px', top: (pageTop - margin) + 'px',
-                width: canvasWidth + 'px', height: canvasHeight + 'px'
+                width: canvasWidth + 'px', height: canvasHeight + 'px',
+                maskImage: fade('right') + ',' + fade('bottom'),
+                maskComposite: 'intersect'
             });
             blurPx = Math.min(58, margin * 0.26);
             applyFilter();
@@ -131,7 +141,7 @@
     // brightness() only scales). Quantized so the style
     // is not rewritten every frame.
     function applyFilter() {
-        const value = 'blur(' + blurPx.toFixed(1) + 'px) saturate(1.75) brightness(' + gain.toFixed(2) + ')';
+        const value = 'blur(' + blurPx.toFixed(1) + 'px) saturate(1.25) brightness(' + gain.toFixed(2) + ')';
         if (value !== appliedFilter) { appliedFilter = value; canvas.style.filter = value; }
     }
     function analyze(now) {
@@ -177,7 +187,10 @@
         if (edgeCount) edgeLuminance += (edgeTotal / (edgeCount * 255) - edgeLuminance) * 0.3;
         // Two-sided: bright (white) frames are toned down too, otherwise the glow
         // washes out the white title/metadata text next to the player.
-        const target = Math.min(2.6, Math.max(0.6, 0.45 / Math.max(0.04, edgeLuminance)));
+        // Kept close to 1 so the glow next to the frame matches the frame's
+        // own colours; strong gain/saturation turned dark teal edges into a
+        // flat bright green.
+        const target = Math.min(1.6, Math.max(0.7, 0.32 / Math.max(0.04, edgeLuminance)));
         gain = Math.round(target * 20) / 20;
         applyFilter();
     }

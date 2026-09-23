@@ -174,6 +174,12 @@ ytd-watch-flexy:not([fullscreen]) #columns {
     position: relative;
 }
 
+/* In theater mode the player sits above #columns, so this glow started in a
+   hard line right under the video (a visible seam). */
+ytd-watch-flexy[theater] #columns::before {
+    display: none !important;
+}
+
 ytd-watch-flexy:not([fullscreen]) #columns::before {
     content: "";
     position: absolute;

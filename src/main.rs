@@ -26,7 +26,7 @@ use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
     platform::windows::{WindowBuilderExtWindows, WindowExtWindows},
-    window::{Theme, WindowBuilder},
+    window::{ResizeDirection, Theme, WindowBuilder},
 };
 use tray_icon::{menu::MenuEvent as TrayMenuEvent, TrayIconEvent};
 use wry::{WebViewBuilder, WebViewBuilderExtWindows};
@@ -44,6 +44,11 @@ enum UserEvent {
     /// Player entered/left fullscreen; mirror it onto the OS window so the
     /// native title bar disappears too.
     Fullscreen(bool),
+    /// Window control from the integrated frame (window_frame.js):
+    /// `min`, `max`, `close`, `drag`, `resize:<dir>`.
+    WindowCmd(String),
+    /// Top-level navigation started/finished at this URL.
+    PageLoad { url: String, finished: bool },
 }
 
 impl From<TrayIconEvent> for UserEvent {
@@ -103,6 +108,10 @@ fn main() -> wry::Result<()> {
             .with_inner_size(PhysicalSize::new(saved.width, saved.height))
             .with_position(PhysicalPosition::new(saved.x, saved.y))
             .with_min_inner_size(PhysicalSize::new(640u32, 480u32))
+            // YouTube pages start with the integrated frame (window_frame.js);
+            // other pages get the native caption back on navigation.
+            .with_decorations(settings.native_titlebar)
+            .with_undecorated_shadow(true)
             .build(&event_loop)
             .expect("failed to create window"),
     );
@@ -186,6 +195,11 @@ fn main() -> wry::Result<()> {
         false,
     ));
     parts.push(youtube_only(include_str!("player_extras.js"), false));
+    parts.push(frame_pages_only(&format!(
+        "window.__YG_CUSTOM_FRAME = {};\n{}",
+        !settings.native_titlebar,
+        include_str!("window_frame.js")
+    )));
     let init_script = parts.join("\n");
     logging::log(format!(
         "init scripts registered separately: theme={} ({} bytes combined)",
@@ -210,7 +224,9 @@ fn main() -> wry::Result<()> {
     let media_for_title = media_controls.clone();
     let media_for_ipc = media_controls.clone();
 
-    let mut webview_builder = WebViewBuilder::new(&window).with_url("https://www.youtube.com");
+    // No initial URL: the non-client-region setting below only applies from
+    // the next navigation, so YouTube is loaded after it is set.
+    let mut webview_builder = WebViewBuilder::new(&window);
     for script in &parts {
         webview_builder = webview_builder.with_initialization_script(script);
     }
@@ -285,6 +301,13 @@ fn main() -> wry::Result<()> {
                 false
             }
         })
+        .with_on_page_load_handler({
+            let load_proxy = proxy.clone();
+            move |event, url| {
+                let finished = matches!(event, wry::PageLoadEvent::Finished);
+                let _ = load_proxy.send_event(UserEvent::PageLoad { url, finished });
+            }
+        })
         .with_ipc_handler({
             let settings_proxy = proxy.clone();
             move |req| {
@@ -296,7 +319,14 @@ fn main() -> wry::Result<()> {
                     .uri()
                     .host()
                     .is_some_and(|h| h == settings::SETTINGS_HOST);
+                let from_frame_page = req.uri().host().is_some_and(is_frame_host);
                 let body = req.into_body();
+                if let Some(cmd) = body.strip_prefix("win:") {
+                    if from_frame_page {
+                        let _ = settings_proxy.send_event(UserEvent::WindowCmd(cmd.to_string()));
+                    }
+                    return;
+                }
                 // The settings page speaks `set:key=value` / `restart` / `back`;
                 // everything else is media state from the player. Forward page
                 // commands to the event loop (they need window/settings access
@@ -395,6 +425,11 @@ fn main() -> wry::Result<()> {
         })
         .build()?;
 
+    let non_client_regions = titlebar::enable_non_client_regions(&webview);
+    if let Err(e) = webview.load_url("https://www.youtube.com") {
+        logging::log(format!("initial load failed: {e}"));
+    }
+
     // Load the bundled browser extensions (SponsorBlock, Return YouTube
     // Dislike) into the WebView2 profile. YTG_ONLY_EXT can restrict to one
     // folder name for debugging.
@@ -417,6 +452,17 @@ fn main() -> wry::Result<()> {
     let mut geometry = saved;
     let event_window = window.clone();
     let has_tray = tray.is_some();
+    // Integrated-frame state: the current top-level URL, whether its page
+    // shows our controls (window decorations off), and the maximized flag
+    // last pushed to the page.
+    let mut current_url = String::from("https://www.youtube.com/");
+    let mut custom_frame = !settings.native_titlebar;
+    let mut pushed_max = false;
+    let push_frame_state = move |webview: &wry::WebView, custom: bool, max: bool| {
+        let _ = webview.evaluate_script(&format!(
+            "window.__ygFrame && window.__ygFrame.set({{custom:{custom},max:{max},nc:{non_client_regions}}})"
+        ));
+    };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -449,6 +495,10 @@ fn main() -> wry::Result<()> {
                     return;
                 }
                 geometry.maximized = event_window.is_maximized();
+                if geometry.maximized != pushed_max {
+                    pushed_max = geometry.maximized;
+                    push_frame_state(&webview, custom_frame, pushed_max);
+                }
                 if !geometry.maximized {
                     if let Ok(pos) = event_window.outer_position() {
                         geometry.x = pos.x;
@@ -493,6 +543,12 @@ fn main() -> wry::Result<()> {
                     } else if menu_event.id == *t.close_to_tray_item.id() {
                         settings.close_to_tray = t.close_to_tray_item.is_checked();
                         settings::save(&settings);
+                    } else if menu_event.id == *t.native_titlebar_item.id() {
+                        settings.native_titlebar = t.native_titlebar_item.is_checked();
+                        settings::save(&settings);
+                        custom_frame = !settings.native_titlebar && url_is_frame_page(&current_url);
+                        event_window.set_decorations(!custom_frame);
+                        push_frame_state(&webview, custom_frame, event_window.is_maximized());
                     } else if menu_event.id == *t.theme_item.id() {
                         settings.theme = t.theme_item.is_checked();
                         settings::save(&settings);
@@ -517,6 +573,56 @@ fn main() -> wry::Result<()> {
                     }
                 }
             }
+
+            Event::UserEvent(UserEvent::PageLoad { url, finished }) => {
+                let custom = !settings.native_titlebar && url_is_frame_page(&url);
+                if custom != custom_frame {
+                    custom_frame = custom;
+                    event_window.set_decorations(!custom);
+                }
+                current_url = url;
+                if finished {
+                    push_frame_state(&webview, custom_frame, event_window.is_maximized());
+                }
+            }
+
+            Event::UserEvent(UserEvent::WindowCmd(cmd)) => match cmd.as_str() {
+                "min" => event_window.set_minimized(true),
+                "max" => event_window.set_maximized(!event_window.is_maximized()),
+                "drag" => {
+                    let _ = event_window.drag_window();
+                }
+                "close" => {
+                    // Same policy as the native close button.
+                    if has_tray && settings.close_to_tray {
+                        event_window.set_visible(false);
+                    } else {
+                        window_state::save(geometry);
+                        settings::save(&settings);
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
+                other => {
+                    let direction = match other.strip_prefix("resize:") {
+                        Some("n") => Some(ResizeDirection::North),
+                        Some("s") => Some(ResizeDirection::South),
+                        Some("e") => Some(ResizeDirection::East),
+                        Some("w") => Some(ResizeDirection::West),
+                        Some("ne") => Some(ResizeDirection::NorthEast),
+                        Some("nw") => Some(ResizeDirection::NorthWest),
+                        Some("se") => Some(ResizeDirection::SouthEast),
+                        Some("sw") => Some(ResizeDirection::SouthWest),
+                        _ => None,
+                    };
+                    match direction {
+                        Some(d) if custom_frame => {
+                            let _ = event_window.drag_resize_window(d);
+                        }
+                        Some(_) => {}
+                        None => logging::log(format!("unknown window command: {other}")),
+                    }
+                }
+            },
 
             Event::UserEvent(UserEvent::Fullscreen(on)) => {
                 event_window.set_fullscreen(if on {
@@ -594,6 +700,15 @@ fn main() -> wry::Result<()> {
                                     t.close_to_tray_item.set_checked(on);
                                 }
                             }
+                            "native_titlebar" => {
+                                settings.native_titlebar = on;
+                                if let Some(t) = &tray {
+                                    t.native_titlebar_item.set_checked(on);
+                                }
+                                custom_frame = !on && url_is_frame_page(&current_url);
+                                event_window.set_decorations(!custom_frame);
+                                push_frame_state(&webview, custom_frame, event_window.is_maximized());
+                            }
                             _ => logging::log(format!("settings: unknown key {key}")),
                         }
                         settings::save(&settings);
@@ -634,5 +749,28 @@ fn youtube_only(script: &str, frames: bool) -> String {
     let frame_check = if frames { "" } else { " && window === window.top" };
     format!(
         "if (/^(?:www\\.|m\\.)?youtube\\.com$/.test(location.hostname){frame_check}) {{\n{script}\n}}\n"
+    )
+}
+
+/// Pages that draw the integrated window controls: the YouTube web app and
+/// our settings page. Everything else (Google sign-in, consent) keeps the
+/// native caption, since it has no controls of its own.
+fn is_frame_host(host: &str) -> bool {
+    matches!(host, "www.youtube.com" | "youtube.com" | "m.youtube.com")
+        || host == settings::SETTINGS_HOST
+}
+
+fn url_is_frame_page(url: &str) -> bool {
+    url.parse::<wry::http::Uri>()
+        .ok()
+        .and_then(|uri| uri.host().map(is_frame_host))
+        .unwrap_or(false)
+}
+
+/// Runs a page script only in the top-level document of a frame page.
+fn frame_pages_only(script: &str) -> String {
+    format!(
+        "if (window === window.top && /^(?:(?:www\\.|m\\.)?youtube\\.com|{host})$/.test(location.hostname)) {{\n{script}\n}}\n",
+        host = settings::SETTINGS_HOST.replace('.', "\\.")
     )
 }

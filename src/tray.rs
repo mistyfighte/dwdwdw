@@ -3,9 +3,9 @@
 //! restores the window; "Quit" actually exits.
 //!
 //! The menu also carries the app's user-facing toggles (theme, ad block,
-//! cinema, always-on-top, close-to-tray) as check items. Their
+//! cinema, always-on-top, close-to-tray, native frame) as check items. Their
 //! initial checked state comes from the loaded `Settings`; the live ones
-//! (always-on-top, close-to-tray) take effect immediately via event-loop
+//! (always-on-top, close-to-tray, native frame) take effect immediately via event-loop
 //! callbacks, the init-script ones (theme/ads/cinema) are picked up
 //! on the next launch via "Restart".
 
@@ -28,6 +28,8 @@ pub struct TrayHandle {
     pub always_on_top_item: CheckMenuItem,
     /// Live toggle: controls whether CloseRequested hides or quits.
     pub close_to_tray_item: CheckMenuItem,
+    /// Live toggle: native Windows caption vs controls in the masthead.
+    pub native_titlebar_item: CheckMenuItem,
     /// Apply-on-restart toggles (theme / ad block / cinema). Their
     /// checked state is read back into Settings on click; the effect lands next
     /// launch.
@@ -74,6 +76,8 @@ where
         CheckMenuItem::new("Поверх всех окон", true, settings.always_on_top, None);
     let close_to_tray_item =
         CheckMenuItem::new("Сворачивать в трей при закрытии", true, settings.close_to_tray, None);
+    let native_titlebar_item =
+        CheckMenuItem::new("Системная рамка окна", true, settings.native_titlebar, None);
     let restart_item = MenuItem::new("Перезапустить", true, None);
     let quit_item = MenuItem::new("Выход", true, None);
     menu.append_items(&[
@@ -85,6 +89,7 @@ where
         &cinema_item,
         &always_on_top_item,
         &close_to_tray_item,
+        &native_titlebar_item,
         &PredefinedMenuItem::separator(),
         &restart_item,
         &quit_item,
@@ -113,6 +118,7 @@ where
         settings_item_id: settings_item.id().clone(),
         always_on_top_item,
         close_to_tray_item,
+        native_titlebar_item,
         theme_item,
         block_ads_item,
         cinema_item,

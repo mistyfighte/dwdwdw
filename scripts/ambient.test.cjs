@@ -145,10 +145,12 @@ test('pillarbox bars wider than the old 19-column cap are detected', () => {
     near(parseFloat(app.canvas().style.top), 120 - margin);
     assert.ok(contentLeft - 80 > 19 / 96 * 800, 'detected bar must exceed the legacy 19-column scan cap');
 });
-test('glow canvas carries no corner-killing radial mask', () => {
+test('glow fades outward with linear masks only (no corner-killing radial mask)', () => {
     const app = harness();
     assert.ok(!/radial/.test(app.canvas().style.cssText || ''));
-    assert.equal(app.canvas().style.maskImage, undefined);
+    assert.ok(!/radial/.test(app.canvas().style.maskImage));
+    assert.match(app.canvas().style.maskImage, /^linear-gradient\(to right,transparent 0,.*linear-gradient\(to bottom,transparent 0,/);
+    assert.equal(app.canvas().style.maskComposite, 'intersect');
     assert.equal(app.root().style.maskImage, undefined);
 });
 test('glow is built from the whole perimeter, mirrored outwards, with the frame behind the hole', () => {
@@ -169,11 +171,11 @@ test('auto-gain lifts dim edges and tones down white ones; saturation boosted', 
     const settle = app => { for (let i = 0; i < 12; i++) { app.tick(); app.frame(); } };
     const dim = harness({ pixels: framePixels(() => 30) }); settle(dim);
     const gainDim = Number(/brightness\(([\d.]+)\)/.exec(dim.canvas().style.filter)[1]);
-    assert.ok(gainDim >= 2.4, 'dim frame gain ' + gainDim);
-    assert.match(dim.canvas().style.filter, /saturate\(1\.75\)/);
+    assert.ok(gainDim >= 1.55 && gainDim <= 1.6, 'dim frame gain ' + gainDim);
+    assert.match(dim.canvas().style.filter, /saturate\(1\.25\)/);
     const bright = harness({ pixels: framePixels(() => 220) }); settle(bright);
     const gainBright = Number(/brightness\(([\d.]+)\)/.exec(bright.canvas().style.filter)[1]);
-    assert.ok(gainBright < 0.7, 'bright frame toned down: ' + gainBright);
+    assert.ok(gainBright <= 0.75, 'bright frame toned down: ' + gainBright);
     const black = harness({ pixels: framePixels(() => 0) }); settle(black);
     assert.ok(Number(black.root().style.opacity) > 0 && Number(black.root().style.opacity) < 0.8);
 });

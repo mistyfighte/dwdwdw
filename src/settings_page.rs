@@ -179,7 +179,7 @@ header p {{ color: var(--muted); margin: 0; font-size: 14px; }}
 <script>
 // Which keys apply live vs need a restart. Drives the badge + the "restart
 // pending" hint shown after a change.
-var LIVE = {{ always_on_top: 1, close_to_tray: 1 }};
+var LIVE = {{ always_on_top: 1, close_to_tray: 1, native_titlebar: 1 }};
 var LABELS = {{
   theme:        {{ t: 'Тема Liquid Glass', d: 'Стеклянная монохромная тема оформления YouTube.' }},
   block_ads:    {{ t: 'Скрытие рекламных баннеров', d: 'Скрывать рекламные баннеры и рекламу в ленте (без пропуска видео-рекламы).' }},
@@ -187,6 +187,7 @@ var LABELS = {{
   prefer_hd:    {{ t: 'Предпочитать 1080p HD', d: 'Записывает предпочтение качества 1080p в профиль YouTube. YouTube может понизить качество при медленном интернете или если ролик не имеет 1080p.' }},
   discord_rpc:  {{ t: 'Discord Rich Presence', d: 'Показывать «Смотрит: название видео» с обложкой в статусе Discord.' }},
   always_on_top:{{ t: 'Поверх всех окон', d: 'Окно остаётся поверх других окон во время работы.' }},
+  native_titlebar:{{ t: 'Системная рамка окна', d: 'Показывать стандартный заголовок Windows вместо кнопок окна, встроенных в верхнюю панель YouTube.' }},
   close_to_tray:{{ t: 'Сворачивать в трей при закрытии', d: 'Кнопка закрытия прячет окно в трей вместо выхода. Выход — через меню трея.' }}
 }};
 var state = null;
@@ -201,7 +202,7 @@ function render() {{
   var content = document.getElementById('content');
   while (content.firstChild) content.removeChild(content.firstChild);
 
-  var live = ['always_on_top','close_to_tray'];
+  var live = ['always_on_top','close_to_tray','native_titlebar'];
   var restart = ['theme','block_ads','cinema','prefer_hd','discord_rpc'];
   var mk = function (keys) {{
     var frag = document.createDocumentFragment();

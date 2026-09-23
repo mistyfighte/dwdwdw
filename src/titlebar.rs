@@ -47,3 +47,24 @@ unsafe fn set_attr<T>(hwnd: HWND, attr: windows::Win32::Graphics::Dwm::DWMWINDOW
         std::mem::size_of::<T>() as u32,
     );
 }
+
+/// Lets CSS `app-region: drag` areas (window_frame.js) act as the window
+/// caption: native dragging, Aero Snap, double-click maximize. Needs a
+/// WebView2 runtime with ICoreWebView2Settings9 (123+); returns false
+/// otherwise and the page falls back to moving the window through IPC.
+/// Takes effect from the next navigation.
+pub fn enable_non_client_regions(webview: &wry::WebView) -> bool {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings9;
+    use windows::core::Interface;
+    use wry::WebViewExtWindows;
+
+    let result = (|| -> windows::core::Result<()> {
+        let core = unsafe { webview.controller().CoreWebView2()? };
+        let settings: ICoreWebView2Settings9 = unsafe { core.Settings()? }.cast()?;
+        unsafe { settings.SetIsNonClientRegionSupportEnabled(true) }
+    })();
+    if let Err(e) = &result {
+        crate::logging::log(format!("non-client regions unavailable: {e}"));
+    }
+    result.is_ok()
+}
