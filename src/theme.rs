@@ -31,6 +31,36 @@ pub fn injection_script() -> String {
                 if (!h.hasAttribute('dark')) h.setAttribute('dark', '');
             }}
 
+            // Forcing the `dark` attribute is not enough when YouTube served
+            // the light theme: its light tokens also ship as `:root:root`
+            // rules that outrank `[dark]` (e.g. white text on the white
+            // Subscribe button). YouTube keeps the appearance choice in the
+            // PREF cookie (f6 bit 0x400 = dark), so select dark there and
+            // reload once when this page was served light.
+            function preferDarkCookie() {{
+                var m = /(?:^|;\s*)PREF=([^;]*)/.exec(document.cookie || '');
+                var params = m ? m[1].split('&').filter(Boolean) : [];
+                var f6 = 0, rest = [];
+                params.forEach(function (p) {{
+                    if (p.indexOf('f6=') === 0) f6 = parseInt(p.slice(3), 16) || 0;
+                    else rest.push(p);
+                }});
+                if (f6 & 0x400) return false;
+                f6 = (f6 | 0x400) & ~0x80000;
+                rest.push('f6=' + f6.toString(16));
+                document.cookie = 'PREF=' + rest.join('&') +
+                    '; domain=.youtube.com; path=/; max-age=63072000; secure; samesite=lax';
+                return true;
+            }}
+            if (preferDarkCookie() && window === window.top) {{
+                var reloaded = false;
+                try {{
+                    reloaded = sessionStorage.getItem('lg-dark-reload') === '1';
+                    sessionStorage.setItem('lg-dark-reload', '1');
+                }} catch (e) {{ reloaded = true; }}
+                if (!reloaded) location.reload();
+            }}
+
             // The palette only works on YouTube's dark variables. YouTube
             // removes `dark` itself (light account preference, appearance
             // menu), which left dark-on-dark text until the next navigation.
@@ -137,6 +167,13 @@ ytd-watch-flexy, #primary, #secondary, #related {
     background-color: transparent !important;
 }
 
+/* Anchor for the ::before below. Without it the glow was positioned against
+   ytd-watch-flexy, and in theater mode (player above #columns) it lay across
+   the top 160px of the video as a translucent white band. */
+ytd-watch-flexy:not([fullscreen]) #columns {
+    position: relative;
+}
+
 ytd-watch-flexy:not([fullscreen]) #columns::before {
     content: "";
     position: absolute;
@@ -163,6 +200,12 @@ ytd-watch-flexy:not([fullscreen]) #secondary {
     backdrop-filter: var(--lg-blur) !important;
     border-bottom: 1px solid rgba(255,255,255,0.10) !important;
     box-shadow: 0 4px 28px rgba(0,0,0,0.55) !important;
+}
+
+/* In theater mode the video starts right under the masthead; its shadow
+   darkened the top ~30px of the picture. */
+html:has(ytd-watch-flexy[theater]:not([fullscreen])) #masthead-container {
+    box-shadow: none !important;
 }
 
 ytd-searchbox#search {
@@ -211,8 +254,12 @@ ytd-watch-flexy #secondary,
     box-shadow: none !important;
 }
 
+/* Dark glass: the ambilight is painted behind these cards, and on bright
+   videos a light card left white text on near-white glow. */
 ytd-comments#comments, ytd-watch-metadata {
-    background: rgba(255,255,255,0.04) !important;
+    background: rgba(14,14,14,0.72) !important;
+    -webkit-backdrop-filter: blur(18px) saturate(1.1) !important;
+    backdrop-filter: blur(18px) saturate(1.1) !important;
     border: 1px solid rgba(255,255,255,0.08) !important;
     border-radius: var(--lg-radius) !important;
     box-shadow: var(--lg-shadow-soft) !important;
@@ -230,6 +277,7 @@ ytd-player#ytd-player .html5-video-player {
 /* Letterbox/pillarbox bars show the ambilight behind the player instead of
    solid black. Windowed only: fullscreen keeps YouTube's black. */
 ytd-watch-flexy:not([fullscreen]) #movie_player:not(.ytp-fullscreen),
+ytd-watch-flexy:not([fullscreen]) #player-full-bleed-container,
 ytd-watch-flexy:not([fullscreen]) #full-bleed-container {
     background: transparent !important;
 }
@@ -269,7 +317,8 @@ ytd-player#ytd-player .html5-video-player {
     background: rgba(255,255,255,0.38);
     border-radius: 999px;
 }
-:is(ytd-app, yt-app) :is(a, button, input, [role="button"], [role="tab"], [tabindex]):focus-visible {
+/* tabindex=-1 targets (the player) are focused by script, not by Tab. */
+:is(ytd-app, yt-app) :is(a, button, input, [role="button"], [role="tab"], [tabindex]:not([tabindex="-1"])):focus-visible {
     outline: 2px solid var(--lg-focus) !important;
     outline-offset: -2px !important;
 }

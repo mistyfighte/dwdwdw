@@ -20,7 +20,9 @@ function harness(options = {}) {
         querySelector: selector => selector.includes('video') ? document.video : selector === '#movie_player' ? { classList: { contains: () => false } } : selector.includes('#secondary') ? { getBoundingClientRect: () => ({ left: 904, top: 120, bottom: 900, width: 350 }) } : null,
         createElement: tag => {
             const element = { tagName: tag, style: {}, setAttribute() {}, appendChild() {},
-                getContext: () => ({ clearRect() {}, drawImage() { draws++; },
+                getContext: () => ({ clearRect() {},
+                    setTransform(...matrix) { if (options.calls) options.calls.push(['transform', ...matrix]); },
+                    drawImage(...args) { draws++; if (options.calls) options.calls.push(['draw', ...args.slice(1)]); },
                     getImageData() { if (options.blockRead) throw Error('SecurityError'); return { data: options.pixels || new Uint8ClampedArray(96 * 54 * 4).fill(100) }; } }) };
             elements.push(element); return element;
         }, video };
@@ -148,6 +150,32 @@ test('glow canvas carries no corner-killing radial mask', () => {
     assert.ok(!/radial/.test(app.canvas().style.cssText || ''));
     assert.equal(app.canvas().style.maskImage, undefined);
     assert.equal(app.root().style.maskImage, undefined);
+});
+test('glow is built from the whole perimeter, mirrored outwards, with the frame behind the hole', () => {
+    const calls = [];
+    const app = harness({ calls });
+    calls.length = 0; app.frame();
+    const draws = calls.filter(call => call[0] === 'draw' && call[5] !== undefined && call.length === 9);
+    // Glow canvas draws: centre + 4 sides + 4 corners, sourced from 14% bands.
+    const glow = draws.filter(call => call[5] === 0 && call[6] === 0 || call[3] === 96 && call[4] === 54);
+    assert.ok(glow.length >= 9, 'draw calls ' + glow.length);
+    const transforms = calls.filter(call => call[0] === 'transform');
+    assert.ok(transforms.some(t => t[1] === -1), 'horizontal mirror used');
+    assert.ok(transforms.some(t => t[4] === -1), 'vertical mirror used');
+    const sides = draws.filter(call => call[3] === 13 || call[4] === 8);
+    assert.ok(sides.length >= 8, 'band-sized sources ' + sides.length);
+});
+test('auto-gain lifts dim edges and tones down white ones; saturation boosted', () => {
+    const settle = app => { for (let i = 0; i < 12; i++) { app.tick(); app.frame(); } };
+    const dim = harness({ pixels: framePixels(() => 30) }); settle(dim);
+    const gainDim = Number(/brightness\(([\d.]+)\)/.exec(dim.canvas().style.filter)[1]);
+    assert.ok(gainDim >= 2.4, 'dim frame gain ' + gainDim);
+    assert.match(dim.canvas().style.filter, /saturate\(1\.75\)/);
+    const bright = harness({ pixels: framePixels(() => 220) }); settle(bright);
+    const gainBright = Number(/brightness\(([\d.]+)\)/.exec(bright.canvas().style.filter)[1]);
+    assert.ok(gainBright < 0.7, 'bright frame toned down: ' + gainBright);
+    const black = harness({ pixels: framePixels(() => 0) }); settle(black);
+    assert.ok(Number(black.root().style.opacity) > 0 && Number(black.root().style.opacity) < 0.8);
 });
 test('asymmetric dark edge is not treated as a bar', () => {
     const app = harness({ pixels: framePixels((row, col) => (col < 20 ? 0 : 100)) });

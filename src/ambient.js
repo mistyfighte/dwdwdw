@@ -10,7 +10,12 @@
     let lastFrame = 0, lastMedia = -1, lastAnalysis = 0, source = '';
     let readBlocked = false, failed = false, bounds = [0, 0, sampleWidth, sampleHeight];
     let crop = [0, 0, sampleWidth, sampleHeight];
-    let luminance = 0.35, geometry = '', layoutFrame = null;
+    let luminance = 0.35, edgeLuminance = 0.35, geometry = '', layoutFrame = null;
+    let blurPx = 0, gain = 1, appliedFilter = '';
+    // Depth of the frame border the glow is built from (fraction of the
+    // content per side). A 4px strip gave thin, noisy colour; a band gives the
+    // average colour along each part of the perimeter.
+    const band = 0.14;
     function eligible() {
         return location.pathname === '/watch' && !document.hidden && !document.fullscreenElement;
     }
@@ -23,7 +28,7 @@
     }
     function reset() {
         lastFrame = 0; lastMedia = -1; lastAnalysis = 0; readBlocked = false; failed = false;
-        luminance = 0.35; bounds = [0, 0, sampleWidth, sampleHeight]; crop = bounds.slice();
+        luminance = 0.35; edgeLuminance = 0.35; gain = 1; bounds = [0, 0, sampleWidth, sampleHeight]; crop = bounds.slice();
         if (sample) sample.width = sampleWidth;
         if (raw) raw.width = sampleWidth;
     }
@@ -115,11 +120,19 @@
             canvas.style.clipPath = 'polygon(evenodd,-50% -50%,150% -50%,150% 150%,-50% 150%,-50% -50%,' + leftHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + bottomHole + 'px,' + rightHole + 'px ' + topHole + 'px,' + leftHole + 'px ' + topHole + 'px)';
             Object.assign(canvas.style, {
                 left: (pageLeft - margin) + 'px', top: (pageTop - margin) + 'px',
-                width: canvasWidth + 'px', height: canvasHeight + 'px',
-                filter: 'blur(' + Math.min(58, margin * 0.26) + 'px) saturate(1.28)'
+                width: canvasWidth + 'px', height: canvasHeight + 'px'
             });
+            blurPx = Math.min(58, margin * 0.26);
+            applyFilter();
         }
         return { edgeX: width * margin / canvasWidth, edgeY: height * margin / canvasHeight };
+    }
+    // Saturation plus auto-gain towards a target level (black stays black -
+    // brightness() only scales). Quantized so the style
+    // is not rewritten every frame.
+    function applyFilter() {
+        const value = 'blur(' + blurPx.toFixed(1) + 'px) saturate(1.75) brightness(' + gain.toFixed(2) + ')';
+        if (value !== appliedFilter) { appliedFilter = value; canvas.style.filter = value; }
     }
     function analyze(now) {
         if (readBlocked || now - lastAnalysis < 500) return;
@@ -150,6 +163,23 @@
         for (let offset = 0; offset < pixels.length; offset += 4) total += pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722;
         const next = total / (sampleWidth * sampleHeight * 255);
         luminance += (next - luminance) * 0.25;
+        const bx = bounds[0], by = bounds[1], bw = bounds[2], bh = bounds[3];
+        const dx = Math.max(1, bw * band), dy = Math.max(1, bh * band);
+        let edgeTotal = 0, edgeCount = 0;
+        for (let row = Math.floor(by); row < Math.min(sampleHeight, by + bh); row++) {
+            for (let col = Math.floor(bx); col < Math.min(sampleWidth, bx + bw); col++) {
+                if (col >= bx + dx && col < bx + bw - dx && row >= by + dy && row < by + bh - dy) continue;
+                const offset = (row * sampleWidth + col) * 4;
+                edgeTotal += pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722;
+                edgeCount++;
+            }
+        }
+        if (edgeCount) edgeLuminance += (edgeTotal / (edgeCount * 255) - edgeLuminance) * 0.3;
+        // Two-sided: bright (white) frames are toned down too, otherwise the glow
+        // washes out the white title/metadata text next to the player.
+        const target = Math.min(2.6, Math.max(0.6, 0.45 / Math.max(0.04, edgeLuminance)));
+        gain = Math.round(target * 20) / 20;
+        applyFilter();
     }
     function schedule() {
         if (!eligible() || !video || video.paused || video.ended || failed || callback !== null || fallback !== null) return;
@@ -159,6 +189,13 @@
             fallback = setTimeout(function () { fallback = null; render(false); }, motion.matches ? 125 : 34);
         }
     }
+    function mirror(sx, sy, sw, sh, dx, dy, dw, dh, flipX, flipY) {
+        context.setTransform(flipX ? -1 : 1, 0, 0, flipY ? -1 : 1, flipX ? dx + dw : dx, flipY ? dy + dh : dy);
+        context.drawImage(sample, sx, sy, sw, sh, 0, 0, dw, dh);
+    }
+    function glowOpacity() {
+        return String((0.74 + Math.sqrt(Math.max(0, luminance)) * 0.22) * (video.paused || video.ended ? 0.85 : 1));
+    }
     function render(force) {
         if (!eligible() || !video || video.readyState < 2 || !video.videoWidth || !ensureDom()) { hide(); return; }
         if (source !== video.currentSrc) { source = video.currentSrc; reset(); }
@@ -166,7 +203,7 @@
         const metrics = layout();
         if (!metrics) { hide(); return; }
         const now = performance.now();
-        if (lastFrame) root.style.opacity = String((0.58 + Math.sqrt(Math.max(0, luminance)) * 0.24) * (video.paused || video.ended ? 0.7 : 1));
+        if (lastFrame) root.style.opacity = glowOpacity();
         if (!force && (now - lastFrame < (motion.matches ? 125 : 32) || video.currentTime === lastMedia)) { schedule(); return; }
         try {
             rawContext.drawImage(video, 0, 0, sampleWidth, sampleHeight);
@@ -175,16 +212,28 @@
             sampleContext.drawImage(raw, crop[0], crop[1], crop[2], crop[3], 0, 0, sampleWidth, sampleHeight);
             const edgeX = metrics.edgeX, edgeY = metrics.edgeY;
             const middleWidth = width - 2 * edgeX, middleHeight = height - 2 * edgeY;
+            const bandX = Math.max(2, Math.round(sampleWidth * band)), bandY = Math.max(2, Math.round(sampleHeight * band));
+            context.setTransform(1, 0, 0, 1, 0, 0);
             context.clearRect(0, 0, width, height);
-            context.drawImage(sample, 0, 0, 4, sampleHeight, 0, edgeY, edgeX, middleHeight);
-            context.drawImage(sample, sampleWidth - 4, 0, 4, sampleHeight, width - edgeX, edgeY, edgeX, middleHeight);
-            context.drawImage(sample, 0, 0, sampleWidth, 3, edgeX, 0, middleWidth, edgeY);
-            context.drawImage(sample, 0, sampleHeight - 3, sampleWidth, 3, edgeX, height - edgeY, middleWidth, edgeY);
-            [[0, 0, 0, 0], [sampleWidth - 4, 0, width - edgeX, 0], [0, sampleHeight - 3, 0, height - edgeY], [sampleWidth - 4, sampleHeight - 3, width - edgeX, height - edgeY]].forEach(function (corner) {
-                context.drawImage(sample, corner[0], corner[1], 4, 3, corner[2], corner[3], edgeX, edgeY);
-            });
+            // The frame itself fills the centre (hidden by the clip hole), so
+            // the blur blends into real colour at the video edge instead of
+            // fading to transparent - the old empty centre darkened the
+            // edge and the corners.
+            context.drawImage(sample, 0, 0, sampleWidth, sampleHeight, edgeX, edgeY, middleWidth, middleHeight);
+            // Each side and corner: the border band mirrored outwards, so the
+            // pixel next to the video is the frame's own edge pixel and every
+            // point of the perimeter lights the area right beside it.
+            mirror(0, 0, bandX, sampleHeight, 0, edgeY, edgeX, middleHeight, true, false);
+            mirror(sampleWidth - bandX, 0, bandX, sampleHeight, width - edgeX, edgeY, edgeX, middleHeight, true, false);
+            mirror(0, 0, sampleWidth, bandY, edgeX, 0, middleWidth, edgeY, false, true);
+            mirror(0, sampleHeight - bandY, sampleWidth, bandY, edgeX, height - edgeY, middleWidth, edgeY, false, true);
+            mirror(0, 0, bandX, bandY, 0, 0, edgeX, edgeY, true, true);
+            mirror(sampleWidth - bandX, 0, bandX, bandY, width - edgeX, 0, edgeX, edgeY, true, true);
+            mirror(0, sampleHeight - bandY, bandX, bandY, 0, height - edgeY, edgeX, edgeY, true, true);
+            mirror(sampleWidth - bandX, sampleHeight - bandY, bandX, bandY, width - edgeX, height - edgeY, edgeX, edgeY, true, true);
+            context.setTransform(1, 0, 0, 1, 0, 0);
             lastFrame = now; lastMedia = video.currentTime;
-            root.style.opacity = String((0.58 + Math.sqrt(Math.max(0, luminance)) * 0.24) * (video.paused || video.ended ? 0.7 : 1));
+            root.style.opacity = glowOpacity();
         } catch (_) { failed = true; hide(); return; }
         schedule();
     }
