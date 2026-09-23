@@ -16,6 +16,7 @@ mod single_instance;
 mod theme;
 mod titlebar;
 mod tray;
+mod webview_loader;
 mod window_state;
 
 use std::rc::Rc;
@@ -70,6 +71,8 @@ fn main() -> wry::Result<()> {
     // Only after the lock: a second launch must not delete files out of the
     // profile the running instance is using.
     extension::purge_harmful_extensions_from_profile();
+    // Before any WebView2 call: the loader DLL is delay-loaded from the EXE.
+    webview_loader::preload();
 
     // User prefs (theme/ads/always-on-top/close-to-tray). Loaded once
     // here; the tray menu seeds its check items from it, and live toggles write

@@ -13,9 +13,50 @@ use webview2_com::ProfileAddBrowserExtensionCompletedHandler;
 use windows::core::{Interface, PCWSTR};
 use wry::{WebView, WebViewExtWindows};
 
-/// Folder names under `extensions/` that ship with this app.
+/// Folder names under `extensions/` that ship with this app (also listed in
+/// build.rs, which embeds them).
 // uBlock Origin Lite disabled - causes black screen (blocks YouTube itself)
 const BUNDLED: &[&str] = &["sponsorblock", "return-youtube-dislike"];
+
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded_extensions.rs"));
+}
+
+/// %LOCALAPPDATA%\YoutubeGlass - unpacked runtime files (extensions, loader).
+pub fn local_data_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())?;
+    Some(PathBuf::from(base).join("YoutubeGlass"))
+}
+
+/// Unpacks the embedded extensions once per build (stamp file) to a fixed
+/// path: unpacked extension IDs derive from the folder path, so a new path
+/// per version would lose each extension's settings.
+fn extracted_root() -> Option<PathBuf> {
+    if embedded::FILES.is_empty() {
+        return None;
+    }
+    let root = local_data_dir()?.join("extensions");
+    let stamp = root.join(".stamp");
+    if std::fs::read_to_string(&stamp).is_ok_and(|s| s == embedded::STAMP) {
+        return Some(root);
+    }
+    for name in BUNDLED {
+        let _ = std::fs::remove_dir_all(root.join(name));
+    }
+    for (rel, bytes) in embedded::FILES {
+        let path = root.join(rel);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, bytes));
+        if let Err(e) = written {
+            crate::logging::log(format!("extension unpack failed at {}: {e}", path.display()));
+            return None;
+        }
+    }
+    let _ = std::fs::write(&stamp, embedded::STAMP);
+    Some(root)
+}
 
 /// Extension IDs that break YouTube playback in WebView2 (blank player / no stream).
 const HARMFUL_EXTENSION_IDS: &[&str] = &[
@@ -103,8 +144,8 @@ pub fn purge_harmful_extensions_from_profile() {
 }
 
 /// Resolve every bundled extension folder that's actually present: prefer the
-/// copy next to the executable, fall back to the path baked in at compile
-/// time (the project tree, for `cargo run` during development).
+/// copy next to the executable, then the copy unpacked from the EXE itself,
+/// then the path baked in at compile time (the project tree).
 pub fn bundled_paths() -> Vec<PathBuf> {
     BUNDLED
         .iter()
@@ -119,6 +160,12 @@ fn resolve(name: &str) -> Option<PathBuf> {
             if p.join("manifest.json").exists() {
                 return Some(p);
             }
+        }
+    }
+    if let Some(root) = extracted_root() {
+        let p = root.join(name);
+        if p.join("manifest.json").exists() {
+            return Some(p);
         }
     }
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
