@@ -301,9 +301,15 @@ ytd-watch-flexy:not([fullscreen]) #full-bleed-container {
     display: none !important;
 }
 
-/* Ambilight glow ring (see ambient.rs). */
-#lg-ambilight {
-    mix-blend-mode: screen;
+/* Ambient light (ambient.js): letterbox bars encoded in the video are cut
+   away so the continuation fills them (insets set by the script, windowed
+   only), and text next to the player gets a soft shadow so it stays
+   readable over bright continuations. */
+html.lg-bars ytd-watch-flexy:not([fullscreen]) #movie_player:not(.ytp-fullscreen) video.video-stream {
+    clip-path: inset(var(--lg-bar-t, 0px) var(--lg-bar-r, 0px) var(--lg-bar-b, 0px) var(--lg-bar-l, 0px));
+}
+html.lg-ambient-on ytd-watch-flexy:not([fullscreen]) :is(#secondary, #below) {
+    text-shadow: 0 1px 2px rgba(0,0,0,0.55), 0 0 12px rgba(0,0,0,0.35);
 }
 
 #player-container-inner, #player-container, #player, #player-wrap,
